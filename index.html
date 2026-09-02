@@ -92,7 +92,7 @@
 
   <main class="max-w-7xl mx-auto px-3 sm:px-4 space-y-4" id="dispatchExportArea">
     <!-- 今日即時統計看板 -->
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-4">
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-4">
       <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
         <div>
           <p class="text-[11px] text-slate-500 font-medium">總編制本工</p>
@@ -120,6 +120,13 @@
           <p class="text-xl sm:text-2xl font-black text-purple-600" id="totalTempCount">0 工</p>
         </div>
         <div class="p-2.5 bg-purple-50 text-purple-600 rounded-lg"><i data-lucide="user-plus" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">今日發包人數</p>
+          <p class="text-xl sm:text-2xl font-black text-cyan-600" id="totalSubcontractCount">0 人</p>
+        </div>
+        <div class="p-2.5 bg-cyan-50 text-cyan-600 rounded-lg"><i data-lucide="hard-hat" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
       </div>
     </div>
 
@@ -569,7 +576,9 @@ const DEFAULT_SAVED_TEMP_WORKERS = ["粗工-阿強", "水電-老李", "油漆-�
 
 let GROUPS_DATA = JSON.parse(localStorage.getItem("TK_GROUPS_DATA_PROD")) || DEFAULT_GROUPS;
 let SAVED_TEMP_WORKERS = JSON.parse(localStorage.getItem("TK_SAVED_TEMP_WORKERS_PROD")) || DEFAULT_SAVED_TEMP_WORKERS;
-let GOOGLE_SCRIPT_URL = localStorage.getItem("TK_GOOGLE_SCRIPT_URL") || "";
+let SUBCONTRACT_DATA = JSON.parse(localStorage.getItem("TK_SUBCONTRACT_DATA")) || {};
+const DEFAULT_GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyOd3BAVhyrR9FS0qw79byeTuWFZNIIYTg6uls04EvIj-7meXvQ8_5a6KmdbgQVu8Ew6Q/exec";
+let GOOGLE_SCRIPT_URL = localStorage.getItem("TK_GOOGLE_SCRIPT_URL") || DEFAULT_GOOGLE_SCRIPT_URL;
 
 let MONTHLY_LEAVES_DB = JSON.parse(localStorage.getItem("TK_MONTHLY_LEAVES_DB")) || {
   "2026-09": {
@@ -589,6 +598,7 @@ function saveDataToLocalStorage() {
   localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
   localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
   localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
+  localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
   pushStateToCloud();
 }
 
@@ -603,7 +613,8 @@ function pushStateToCloud() {
       action: "saveState",
       groupsData: GROUPS_DATA,
       savedTempWorkers: SAVED_TEMP_WORKERS,
-      monthlyLeavesDb: MONTHLY_LEAVES_DB
+      monthlyLeavesDb: MONTHLY_LEAVES_DB,
+      subcontractData: SUBCONTRACT_DATA
     })
   }).then(() => {
     updateCloudBadge(true);
@@ -623,9 +634,11 @@ async function loadStateFromCloud() {
     }
     if (data && data.savedTempWorkers) SAVED_TEMP_WORKERS = data.savedTempWorkers;
     if (data && data.monthlyLeavesDb) MONTHLY_LEAVES_DB = data.monthlyLeavesDb;
+    if (data && data.subcontractData) SUBCONTRACT_DATA = data.subcontractData;
     localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
     localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
     localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
+    localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
   } catch (err) {
     console.warn("雲端資料讀取失敗，暫時使用本機資料：", err);
   }
@@ -1155,11 +1168,31 @@ function renderUI() {
       tempWorkersHTML = `<p class="text-xs text-slate-400 italic py-0.5">今日尚無額外點工</p>`;
     }
 
+    const subcontractList = getSubcontractList(group.id);
+    const subcontractTotal = subcontractList.reduce((sum, sc) => sum + (parseInt(sc.count, 10) || 0), 0);
+    let subcontractHTML = "";
+    if (subcontractList.length > 0) {
+      subcontractHTML = subcontractList.map((sc, idx) => `
+        <div class="flex items-center justify-between text-xs bg-cyan-50 border border-cyan-100 px-2.5 py-1.5 rounded-lg mb-1.5 gap-1">
+          <div class="flex items-center flex-wrap gap-x-2 gap-y-0.5">
+            <span class="font-bold text-cyan-900">${sc.vendor}</span>
+            ${sc.workItem ? `<span class="text-cyan-700 text-[11px]">(${sc.workItem})</span>` : ''}
+            <span class="text-cyan-600 font-medium">${sc.count}人</span>
+            <span class="text-slate-600 bg-white px-1.5 py-0.5 rounded text-[11px]">📍 ${sc.site}</span>
+          </div>
+          <button onclick="removeSubcontractEntry('${group.id}', ${idx})" class="text-slate-400 hover:text-red-500 p-0.5"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+        </div>
+      `).join('');
+    } else {
+      subcontractHTML = `<p class="text-xs text-slate-400 italic py-0.5">今日尚無發包人員</p>`;
+    }
+
     card.innerHTML = `
       <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2">
         <div class="flex items-center space-x-2">
           <span class="font-black text-slate-900 text-base">${group.name}</span>
           <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-md font-bold">${group.managerName} ${group.managerTitle}</span>
+          ${subcontractTotal > 0 ? `<span class="text-xs bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded-md font-bold">🔧 發包 ${subcontractTotal}人</span>` : ''}
         </div>
         
         <div class="flex items-center space-x-1.5">
@@ -1204,6 +1237,24 @@ function renderUI() {
                 <option value="1.5">1.5工</option>
               </select>
               <button onclick="addTempWorker('${group.id}')" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
+            </div>
+          </div>
+
+          <div class="mt-3.5 pt-2.5 border-t border-dashed border-slate-200">
+            <span class="text-xs font-bold text-slate-700 flex items-center mb-1.5">
+              <i data-lucide="hard-hat" class="w-3.5 h-3.5 text-cyan-600 mr-1"></i> 發包人數登記
+              ${subcontractTotal > 0 ? `<span class="ml-1.5 text-[11px] bg-cyan-50 text-cyan-700 px-1.5 py-0.5 rounded-full font-black">共 ${subcontractTotal} 人</span>` : ''}
+            </span>
+            ${subcontractHTML}
+            <div class="flex flex-wrap gap-1.5 mt-1.5">
+              <input type="text" id="scVendor_${group.id}" placeholder="發包廠商名稱" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
+              <input type="text" id="scItem_${group.id}" placeholder="工項(手動輸入)" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
+              <select id="scSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
+                ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
+                ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}">${s}</option>`).join('')}
+              </select>
+              <input type="number" id="scCount_${group.id}" min="1" value="1" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-16 text-center">
+              <button onclick="addSubcontractEntry('${group.id}')" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
             </div>
           </div>
         </div>
@@ -1309,8 +1360,39 @@ function addTempWorker(groupId) {
 }
 function removeTempWorker(groupId, idx) { currentDispatch[groupId].tempWorkers.splice(idx, 1); renderUI(); }
 
+// ===== 發包人數登記（依日期各自獨立記錄，不影響本工/點工工數統計） =====
+function getSubcontractList(groupId) {
+  const date = document.getElementById("dispatchDate").value;
+  if (!SUBCONTRACT_DATA[date]) SUBCONTRACT_DATA[date] = {};
+  if (!SUBCONTRACT_DATA[date][groupId]) SUBCONTRACT_DATA[date][groupId] = [];
+  return SUBCONTRACT_DATA[date][groupId];
+}
+
+function addSubcontractEntry(groupId) {
+  const vendor = document.getElementById(`scVendor_${groupId}`).value.trim();
+  const workItem = document.getElementById(`scItem_${groupId}`).value.trim();
+  const site = document.getElementById(`scSite_${groupId}`).value;
+  let count = parseInt(document.getElementById(`scCount_${groupId}`).value, 10);
+  if (!vendor) return alert("請輸入發包廠商名稱！");
+  if (!count || count < 1) count = 1;
+
+  getSubcontractList(groupId).push({ vendor, workItem, site, count });
+  saveDataToLocalStorage();
+
+  document.getElementById(`scVendor_${groupId}`).value = "";
+  document.getElementById(`scItem_${groupId}`).value = "";
+  document.getElementById(`scCount_${groupId}`).value = "1";
+  renderUI();
+}
+
+function removeSubcontractEntry(groupId, idx) {
+  getSubcontractList(groupId).splice(idx, 1);
+  saveDataToLocalStorage();
+  renderUI();
+}
+
 function calculateStats() {
-  let totalM = 0, totalO = 0, totalW = 0, totalT = 0;
+  let totalM = 0, totalO = 0, totalW = 0, totalT = 0, totalSC = 0;
   GROUPS_DATA.forEach(group => {
     totalM += (group.members.length + 1);
     const s = currentDispatch[group.id];
@@ -1333,10 +1415,18 @@ function calculateStats() {
       s.tempWorkers.forEach(tw => totalT += (tw.ratio || 0));
     }
   });
+
+  const dateStr = document.getElementById("dispatchDate").value;
+  const dayScData = SUBCONTRACT_DATA[dateStr] || {};
+  Object.keys(dayScData).forEach(gid => {
+    (dayScData[gid] || []).forEach(sc => totalSC += (parseInt(sc.count, 10) || 0));
+  });
+
   document.getElementById("totalMembers").innerText = totalM + " 人";
   document.getElementById("totalOffCount").innerText = totalO + " 人";
   document.getElementById("totalWorkCount").innerText = totalW + " 工";
   document.getElementById("totalTempCount").innerText = totalT + " 工";
+  document.getElementById("totalSubcontractCount").innerText = totalSC + " 人";
 }
 
 // 各組案場管理與刪除邏輯
@@ -1808,6 +1898,9 @@ function sendToGoogleSheet(groupId) {
   borrowedInList.forEach(bm => records.push({ name: bm.name, role: "跨組支援", site: bm.assignedSite, workRatio: bm.workRatio, remark: `來自 ${bm.fromGroupName}` }));
   state.tempWorkers.forEach(tw => records.push({ name: tw.name, role: "點工", site: tw.site, workRatio: tw.ratio, remark: "外部點工調用" }));
 
+  const subcontractList = getSubcontractList(groupId);
+  subcontractList.forEach(sc => records.push({ name: sc.vendor, role: "發包", site: sc.site, workRatio: sc.count, remark: `工項:${sc.workItem || '未填寫'}／發包人數:${sc.count}人（不計入本工工數）` }));
+
   if (GOOGLE_SCRIPT_URL) {
     fetch(GOOGLE_SCRIPT_URL, {
       method: "POST",
@@ -1885,6 +1978,8 @@ function formatSingleGroupData(group) {
   const state = currentDispatch[group.id];
   const mgrState = state.managerStatus;
   const borrowedInList = getBorrowedInMembers(group.id);
+  const subcontractList = getSubcontractList(group.id);
+  const subcontractTotal = subcontractList.reduce((sum, sc) => sum + (parseInt(sc.count, 10) || 0), 0);
 
   let rawText = `━━━━━━━━━━━━━━━━━━━━━\n`;
   rawText += `📍【${group.name}】（直轄主管：${group.managerName} ${group.managerTitle}）\n\n`;
@@ -1973,6 +2068,14 @@ function formatSingleGroupData(group) {
     rawText += `\n`;
   }
 
+  if (subcontractList.length > 0) {
+    rawText += `▪ 發包人數（共 ${subcontractTotal} 人，不計入本工工數）：\n`;
+    subcontractList.forEach(sc => {
+      rawText += `  🔧 ${sc.vendor}${sc.workItem ? '(' + sc.workItem + ')' : ''} [📍${sc.site}] ${sc.count}人\n`;
+    });
+    rawText += `\n`;
+  }
+
   if (borrowing.length > 0) {
     rawText += `▪ 跨組借出（${borrowing.length}人）：\n`;
     borrowing.forEach(b => {
@@ -2024,6 +2127,21 @@ function formatSingleGroupData(group) {
     `;
   }
 
+  let subcontractCardHTML = "";
+  if (subcontractList.length > 0) {
+    subcontractCardHTML = `
+      <div class="bg-cyan-50/70 border border-cyan-100 rounded-xl p-2.5 space-y-1">
+        <div class="text-xs font-black text-cyan-900 flex items-center justify-between">
+          <span class="flex items-center"><i data-lucide="hard-hat" class="w-3.5 h-3.5 text-cyan-600 mr-1"></i> 發包人數（不計入本工）</span>
+          <span class="bg-cyan-200/80 text-cyan-800 px-2 py-0.5 rounded-full text-[10px]">${subcontractTotal} 人</span>
+        </div>
+        <div class="text-xs text-cyan-950 font-medium pl-4 space-y-0.5">
+          ${subcontractList.map(sc => `<div>🔧 ${sc.vendor}${sc.workItem ? '(' + sc.workItem + ')' : ''} (📍${sc.site} / ${sc.count}人)</div>`).join('')}
+        </div>
+      </div>
+    `;
+  }
+
   let borrowCardHTML = "";
   if (borrowing.length > 0) {
     borrowCardHTML = `
@@ -2062,6 +2180,7 @@ function formatSingleGroupData(group) {
       <div class="space-y-2">
         ${sitesCardHTML}
         ${tempCardHTML}
+        ${subcontractCardHTML}
         ${borrowCardHTML}
         ${restCardHTML}
       </div>
