@@ -588,7 +588,6 @@ let MONTHLY_LEAVES_DB = JSON.parse(localStorage.getItem("TK_MONTHLY_LEAVES_DB"))
   }
 };
 
-let BORROWED_IN_ASSIGNED_SITES = {};
 // v_fix: 每日派工資料持久化儲存區，key = 日期 "YYYY-MM-DD"
 // 用來解決「本工派工重整就遺失」的問題
 let DAILY_DISPATCH_DB = JSON.parse(localStorage.getItem("TK_DAILY_DISPATCH_DB")) || {};
@@ -954,7 +953,11 @@ function initDispatchState() {
 
   GROUPS_DATA.forEach(group => {
     if (!currentDispatch[group.id]) {
-      currentDispatch[group.id] = { managerStatus: {}, memberStatus: {}, tempWorkers: [] };
+      currentDispatch[group.id] = { managerStatus: {}, memberStatus: {}, tempWorkers: [], borrowedInSites: {} };
+    }
+    // v_fix: 舊存檔資料可能沒有 borrowedInSites 欄位，補上避免借入人員案場選擇跑掉
+    if (!currentDispatch[group.id].borrowedInSites) {
+      currentDispatch[group.id].borrowedInSites = {};
     }
 
     // 主管：若已有保存資料，只同步請假狀態變動；若沒保存過，全新初始化
@@ -1042,15 +1045,17 @@ function getBorrowedInMembers(targetGroupId) {
     const sourceState = currentDispatch[sourceGroup.id];
     if (!sourceState) return;
 
+    const targetBorrowedInSites = (currentDispatch[targetGroupId] && currentDispatch[targetGroupId].borrowedInSites) || {};
+
     const mgrState = sourceState.managerStatus;
     if (mgrState && mgrState.status === 'borrow' && mgrState.targetGroupId === targetGroupId) {
       const fullName = `${mgrState.name}(${mgrState.title})`;
-      if (!BORROWED_IN_ASSIGNED_SITES[fullName]) BORROWED_IN_ASSIGNED_SITES[fullName] = defaultSite;
+      if (!targetBorrowedInSites[fullName]) targetBorrowedInSites[fullName] = defaultSite;
       list.push({ 
         name: fullName, 
         fromGroupName: sourceGroup.name, 
         workRatio: mgrState.workRatio || 1.0, 
-        assignedSite: BORROWED_IN_ASSIGNED_SITES[fullName],
+        assignedSite: targetBorrowedInSites[fullName],
         leaveType: mgrState.leaveType || ''
       });
     }
@@ -1058,16 +1063,18 @@ function getBorrowedInMembers(targetGroupId) {
     sourceGroup.members.forEach(member => {
       const mState = sourceState.memberStatus[member];
       if (mState && mState.status === 'borrow' && mState.targetGroupId === targetGroupId) {
-        if (!BORROWED_IN_ASSIGNED_SITES[member]) BORROWED_IN_ASSIGNED_SITES[member] = defaultSite;
+        if (!targetBorrowedInSites[member]) targetBorrowedInSites[member] = defaultSite;
         list.push({ 
           name: member, 
           fromGroupName: sourceGroup.name, 
           workRatio: mState.workRatio || 1.0, 
-          assignedSite: BORROWED_IN_ASSIGNED_SITES[member],
+          assignedSite: targetBorrowedInSites[member],
           leaveType: mState.leaveType || ''
         });
       }
     });
+
+    if (currentDispatch[targetGroupId]) currentDispatch[targetGroupId].borrowedInSites = targetBorrowedInSites;
   });
   return list;
 }
@@ -1227,7 +1234,7 @@ function renderUI() {
           </div>
           <div class="flex items-center space-x-1 flex-1 sm:justify-end">
             <span class="text-[11px] text-purple-800 font-bold">派往:</span>
-            <select onchange="updateBorrowedInMemberSite('${bm.name}', this.value)" class="text-xs font-bold bg-white border border-purple-300 rounded-lg px-2 py-1 text-purple-900 focus:outline-none flex-1 sm:flex-none">
+            <select onchange="updateBorrowedInMemberSite('${group.id}', '${bm.name}', this.value)" class="text-xs font-bold bg-white border border-purple-300 rounded-lg px-2 py-1 text-purple-900 focus:outline-none flex-1 sm:flex-none">
               ${group.sites.map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
               ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s} (他場)</option>`).join('')}
             </select>
@@ -1434,7 +1441,12 @@ function updateMemberSite(groupId, member, newSite) {
 
 function updateManagerBorrowTarget(groupId, targetGroupId) { currentDispatch[groupId].managerStatus.targetGroupId = targetGroupId; renderUI(); }
 function updateBorrowTargetGroup(groupId, member, targetGroupId) { currentDispatch[groupId].memberStatus[member].targetGroupId = targetGroupId; renderUI(); }
-function updateBorrowedInMemberSite(memberName, site) { BORROWED_IN_ASSIGNED_SITES[memberName] = site; renderUI(); }
+function updateBorrowedInMemberSite(groupId, memberName, site) {
+  if (!currentDispatch[groupId]) return;
+  if (!currentDispatch[groupId].borrowedInSites) currentDispatch[groupId].borrowedInSites = {};
+  currentDispatch[groupId].borrowedInSites[memberName] = site;
+  renderUI();
+}
 
 function addTempWorker(groupId) {
   const name = document.getElementById(`twName_${groupId}`).value.trim();
