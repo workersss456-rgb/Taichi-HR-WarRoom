@@ -577,6 +577,7 @@ const DEFAULT_SAVED_TEMP_WORKERS = ["粗工-阿強", "水電-老李", "油漆-�
 let GROUPS_DATA = JSON.parse(localStorage.getItem("TK_GROUPS_DATA_PROD")) || DEFAULT_GROUPS;
 let SAVED_TEMP_WORKERS = JSON.parse(localStorage.getItem("TK_SAVED_TEMP_WORKERS_PROD")) || DEFAULT_SAVED_TEMP_WORKERS;
 let SUBCONTRACT_DATA = JSON.parse(localStorage.getItem("TK_SUBCONTRACT_DATA")) || {};
+let DAILY_TEMP_WORKERS = JSON.parse(localStorage.getItem("TK_DAILY_TEMP_WORKERS")) || {};
 const DEFAULT_GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyOd3BAVhyrR9FS0qw79byeTuWFZNIIYTg6uls04EvIj-7meXvQ8_5a6KmdbgQVu8Ew6Q/exec";
 let GOOGLE_SCRIPT_URL = localStorage.getItem("TK_GOOGLE_SCRIPT_URL") || DEFAULT_GOOGLE_SCRIPT_URL;
 
@@ -599,6 +600,7 @@ function saveDataToLocalStorage() {
   localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
   localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
   localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
+  localStorage.setItem("TK_DAILY_TEMP_WORKERS", JSON.stringify(DAILY_TEMP_WORKERS));
   pushStateToCloud();
 }
 
@@ -614,7 +616,8 @@ function pushStateToCloud() {
       groupsData: GROUPS_DATA,
       savedTempWorkers: SAVED_TEMP_WORKERS,
       monthlyLeavesDb: MONTHLY_LEAVES_DB,
-      subcontractData: SUBCONTRACT_DATA
+      subcontractData: SUBCONTRACT_DATA,
+      dailyTempWorkers: DAILY_TEMP_WORKERS
     })
   }).then(() => {
     updateCloudBadge(true);
@@ -635,10 +638,12 @@ async function loadStateFromCloud() {
     if (data && data.savedTempWorkers) SAVED_TEMP_WORKERS = data.savedTempWorkers;
     if (data && data.monthlyLeavesDb) MONTHLY_LEAVES_DB = data.monthlyLeavesDb;
     if (data && data.subcontractData) SUBCONTRACT_DATA = data.subcontractData;
+    if (data && data.dailyTempWorkers) DAILY_TEMP_WORKERS = data.dailyTempWorkers;
     localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
     localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
     localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
     localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
+    localStorage.setItem("TK_DAILY_TEMP_WORKERS", JSON.stringify(DAILY_TEMP_WORKERS));
   } catch (err) {
     console.warn("雲端資料讀取失敗，暫時使用本機資料：", err);
   }
@@ -918,7 +923,7 @@ function initDispatchState() {
 
   GROUPS_DATA.forEach(group => {
     if (!currentDispatch[group.id]) {
-      currentDispatch[group.id] = { managerStatus: {}, memberStatus: {}, tempWorkers: [] };
+      currentDispatch[group.id] = { managerStatus: {}, memberStatus: {} };
     }
 
     const mgrLeaveType = monthData[group.managerName] ? monthData[group.managerName][selectedDate] : null;
@@ -1152,9 +1157,10 @@ function renderUI() {
       `).join('');
     }
 
+    const tempWorkerList = getTempWorkerList(group.id);
     let tempWorkersHTML = "";
-    if (state.tempWorkers.length > 0) {
-      tempWorkersHTML = state.tempWorkers.map((tw, idx) => `
+    if (tempWorkerList.length > 0) {
+      tempWorkersHTML = tempWorkerList.map((tw, idx) => `
         <div class="flex items-center justify-between text-xs bg-purple-50 border border-purple-100 px-2.5 py-1.5 rounded-lg mb-1.5">
           <div class="flex items-center space-x-2">
             <span class="font-bold text-purple-900">${tw.name}</span>
@@ -1349,16 +1355,31 @@ function updateManagerBorrowTarget(groupId, targetGroupId) { currentDispatch[gro
 function updateBorrowTargetGroup(groupId, member, targetGroupId) { currentDispatch[groupId].memberStatus[member].targetGroupId = targetGroupId; renderUI(); }
 function updateBorrowedInMemberSite(memberName, site) { BORROWED_IN_ASSIGNED_SITES[memberName] = site; renderUI(); }
 
+// ===== 外部點工登記（依日期各自獨立記錄，與發包人數相同的持久化方式） =====
+function getTempWorkerList(groupId) {
+  const date = document.getElementById("dispatchDate").value;
+  if (!DAILY_TEMP_WORKERS[date]) DAILY_TEMP_WORKERS[date] = {};
+  if (!DAILY_TEMP_WORKERS[date][groupId]) DAILY_TEMP_WORKERS[date][groupId] = [];
+  return DAILY_TEMP_WORKERS[date][groupId];
+}
+
 function addTempWorker(groupId) {
   const name = document.getElementById(`twName_${groupId}`).value.trim();
   const site = document.getElementById(`twSite_${groupId}`).value;
   const ratio = parseFloat(document.getElementById(`twRatio_${groupId}`).value);
   if (!name) return alert("請輸入點工姓名！");
-  if (!SAVED_TEMP_WORKERS.includes(name)) { SAVED_TEMP_WORKERS.push(name); saveDataToLocalStorage(); }
-  currentDispatch[groupId].tempWorkers.push({ name, site, ratio });
+  if (!SAVED_TEMP_WORKERS.includes(name)) { SAVED_TEMP_WORKERS.push(name); }
+  getTempWorkerList(groupId).push({ name, site, ratio });
+  saveDataToLocalStorage();
+
+  document.getElementById(`twName_${groupId}`).value = "";
   renderUI();
 }
-function removeTempWorker(groupId, idx) { currentDispatch[groupId].tempWorkers.splice(idx, 1); renderUI(); }
+function removeTempWorker(groupId, idx) {
+  getTempWorkerList(groupId).splice(idx, 1);
+  saveDataToLocalStorage();
+  renderUI();
+}
 
 // ===== 發包人數登記（依日期各自獨立記錄，不影響本工/點工工數統計） =====
 function getSubcontractList(groupId) {
@@ -1411,9 +1432,7 @@ function calculateStats() {
       });
     }
 
-    if (s && s.tempWorkers) {
-      s.tempWorkers.forEach(tw => totalT += (tw.ratio || 0));
-    }
+    getTempWorkerList(group.id).forEach(tw => totalT += (tw.ratio || 0));
   });
 
   const dateStr = document.getElementById("dispatchDate").value;
@@ -1896,7 +1915,7 @@ function sendToGoogleSheet(groupId) {
   });
 
   borrowedInList.forEach(bm => records.push({ name: bm.name, role: "跨組支援", site: bm.assignedSite, workRatio: bm.workRatio, remark: `來自 ${bm.fromGroupName}` }));
-  state.tempWorkers.forEach(tw => records.push({ name: tw.name, role: "點工", site: tw.site, workRatio: tw.ratio, remark: "外部點工調用" }));
+  getTempWorkerList(groupId).forEach(tw => records.push({ name: tw.name, role: "點工", site: tw.site, workRatio: tw.ratio, remark: "外部點工調用" }));
 
   const subcontractList = getSubcontractList(groupId);
   subcontractList.forEach(sc => records.push({ name: sc.vendor, role: "發包", site: sc.site, workRatio: sc.count, remark: `工項:${sc.workItem || '未填寫'}／發包人數:${sc.count}人（不計入本工工數）` }));
@@ -1980,6 +1999,7 @@ function formatSingleGroupData(group) {
   const borrowedInList = getBorrowedInMembers(group.id);
   const subcontractList = getSubcontractList(group.id);
   const subcontractTotal = subcontractList.reduce((sum, sc) => sum + (parseInt(sc.count, 10) || 0), 0);
+  const tempWorkerList = getTempWorkerList(group.id);
 
   let rawText = `━━━━━━━━━━━━━━━━━━━━━\n`;
   rawText += `📍【${group.name}】（直轄主管：${group.managerName} ${group.managerTitle}）\n\n`;
@@ -2060,9 +2080,9 @@ function formatSingleGroupData(group) {
     rawText += `▪ 今日無組內派駐出工\n\n`;
   }
   
-  if (state.tempWorkers.length > 0) {
-    rawText += `▪ 外部點工（${state.tempWorkers.length}人）：\n`;
-    state.tempWorkers.forEach(tw => {
+  if (tempWorkerList.length > 0) {
+    rawText += `▪ 外部點工（${tempWorkerList.length}人）：\n`;
+    tempWorkerList.forEach(tw => {
       rawText += `  ▫ ${tw.name} [📍${tw.site}] (${tw.ratio}工)\n`;
     });
     rawText += `\n`;
@@ -2113,15 +2133,15 @@ function formatSingleGroupData(group) {
   }
 
   let tempCardHTML = "";
-  if (state.tempWorkers.length > 0) {
+  if (tempWorkerList.length > 0) {
     tempCardHTML = `
       <div class="bg-purple-50/70 border border-purple-100 rounded-xl p-2.5 space-y-1">
         <div class="text-xs font-black text-purple-900 flex items-center justify-between">
           <span class="flex items-center"><i data-lucide="user-plus" class="w-3.5 h-3.5 text-purple-600 mr-1"></i> 外部點工調用</span>
-          <span class="bg-purple-200/80 text-purple-800 px-2 py-0.5 rounded-full text-[10px]">${state.tempWorkers.length} 人</span>
+          <span class="bg-purple-200/80 text-purple-800 px-2 py-0.5 rounded-full text-[10px]">${tempWorkerList.length} 人</span>
         </div>
         <div class="text-xs text-purple-950 font-medium pl-4 space-y-0.5">
-          ${state.tempWorkers.map(tw => `<div>▫ ${tw.name} (📍${tw.site} / ${tw.ratio}工)</div>`).join('')}
+          ${tempWorkerList.map(tw => `<div>▫ ${tw.name} (📍${tw.site} / ${tw.ratio}工)</div>`).join('')}
         </div>
       </div>
     `;
