@@ -591,6 +591,7 @@ let MONTHLY_LEAVES_DB = JSON.parse(localStorage.getItem("TK_MONTHLY_LEAVES_DB"))
 
 let BORROWED_IN_ASSIGNED_SITES = {};
 let currentDispatch = {};
+let DAILY_DISPATCH_DATA = JSON.parse(localStorage.getItem("TK_DAILY_DISPATCH_DATA")) || {};
 let activeLeaveTypeBrush = "";
 let activeAddingSiteGroupId = null;
 let activeManagingGroupId = null;
@@ -617,6 +618,7 @@ function saveDataToLocalStorage() {
   localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
   localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
   localStorage.setItem("TK_DAILY_TEMP_WORKERS", JSON.stringify(DAILY_TEMP_WORKERS));
+  localStorage.setItem("TK_DAILY_DISPATCH_DATA", JSON.stringify(DAILY_DISPATCH_DATA));
   pushStateToCloud();
 }
 
@@ -633,7 +635,8 @@ function pushStateToCloud() {
       savedTempWorkers: SAVED_TEMP_WORKERS,
       monthlyLeavesDb: MONTHLY_LEAVES_DB,
       subcontractData: SUBCONTRACT_DATA,
-      dailyTempWorkers: DAILY_TEMP_WORKERS
+      dailyTempWorkers: DAILY_TEMP_WORKERS,
+      dailyDispatchData: DAILY_DISPATCH_DATA
     })
   }).then(() => {
     updateCloudBadge(true);
@@ -655,11 +658,13 @@ async function loadStateFromCloud() {
     if (data && data.monthlyLeavesDb) MONTHLY_LEAVES_DB = data.monthlyLeavesDb;
     if (data && data.subcontractData) SUBCONTRACT_DATA = data.subcontractData;
     if (data && data.dailyTempWorkers) DAILY_TEMP_WORKERS = data.dailyTempWorkers;
+    if (data && data.dailyDispatchData) DAILY_DISPATCH_DATA = data.dailyDispatchData;
     localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
     localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
     localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
     localStorage.setItem("TK_SUBCONTRACT_DATA", JSON.stringify(SUBCONTRACT_DATA));
     localStorage.setItem("TK_DAILY_TEMP_WORKERS", JSON.stringify(DAILY_TEMP_WORKERS));
+    localStorage.setItem("TK_DAILY_DISPATCH_DATA", JSON.stringify(DAILY_DISPATCH_DATA));
   } catch (err) {
     console.warn("雲端資料讀取失敗，暫時使用本機資料：", err);
   }
@@ -671,9 +676,9 @@ function swapFormControlsForCapture(node) {
   const swapped = [];
 
   node.querySelectorAll("select").forEach(sel => {
-    const opt = sel.options[sel.selectedIndex];
+    const opt = (sel.selectedOptions && sel.selectedOptions[0]) || sel.options[sel.selectedIndex];
     const span = document.createElement("span");
-    span.textContent = opt ? opt.text : "";
+    span.textContent = opt ? opt.text : (sel.value || "");
     span.className = sel.className;
     span.style.cssText = window.getComputedStyle(sel).cssText;
     span.style.display = "inline-flex";
@@ -932,40 +937,65 @@ function renderConfirmView() {
 }
 
 // 派工資料初始化與防呆
+// 重要：這裡「絕對不能」對已經存在的當日派工紀錄做覆蓋——只補上「當天還沒有紀錄」的
+// 主管/成員預設值（例如全新的一天、或新加入名冊的成員），已經指派過的案場、狀態一律保留原樣。
 function initDispatchState() {
   const selectedDate = document.getElementById("dispatchDate").value;
   const yearMonth = selectedDate.substring(0, 7);
   const monthData = MONTHLY_LEAVES_DB[yearMonth] || {};
 
+  if (!DAILY_DISPATCH_DATA[selectedDate]) DAILY_DISPATCH_DATA[selectedDate] = {};
+  const dayData = DAILY_DISPATCH_DATA[selectedDate];
+  let hasNewDefaults = false;
+
   GROUPS_DATA.forEach(group => {
-    if (!currentDispatch[group.id]) {
-      currentDispatch[group.id] = { managerStatus: {}, memberStatus: {} };
+    if (!dayData[group.id]) {
+      dayData[group.id] = { managerStatus: null, memberStatus: {} };
     }
+    const saved = dayData[group.id];
 
-    const mgrLeaveType = monthData[group.managerName] ? monthData[group.managerName][selectedDate] : null;
-    const isMgrOff = !!mgrLeaveType;
-    currentDispatch[group.id].managerStatus = {
-      name: group.managerName,
-      title: group.managerTitle,
-      status: isMgrOff ? 'off' : 'work',
-      workRatio: isMgrOff ? 0 : 1.0,
-      assignedSite: group.sites[0] || "未指定案場",
-      targetGroupId: '',
-      leaveType: mgrLeaveType || ''
-    };
-
-    group.members.forEach(m => {
-      const memberLeaveType = monthData[m] ? monthData[m][selectedDate] : null;
-      const isOff = !!memberLeaveType;
-      currentDispatch[group.id].memberStatus[m] = {
-        status: isOff ? 'off' : 'work',
-        workRatio: isOff ? 0 : 1.0,
+    if (!saved.managerStatus) {
+      const mgrLeaveType = monthData[group.managerName] ? monthData[group.managerName][selectedDate] : null;
+      const isMgrOff = !!mgrLeaveType;
+      saved.managerStatus = {
+        name: group.managerName,
+        title: group.managerTitle,
+        status: isMgrOff ? 'off' : 'work',
+        workRatio: isMgrOff ? 0 : 1.0,
         assignedSite: group.sites[0] || "未指定案場",
         targetGroupId: '',
-        leaveType: memberLeaveType || ''
+        leaveType: mgrLeaveType || ''
       };
+      hasNewDefaults = true;
+    } else {
+      // 姓名/職稱以最新名冊為準，避免改名後派工卡片顯示舊資料
+      saved.managerStatus.name = group.managerName;
+      saved.managerStatus.title = group.managerTitle;
+    }
+
+    group.members.forEach(m => {
+      if (!saved.memberStatus[m]) {
+        const memberLeaveType = monthData[m] ? monthData[m][selectedDate] : null;
+        const isOff = !!memberLeaveType;
+        saved.memberStatus[m] = {
+          status: isOff ? 'off' : 'work',
+          workRatio: isOff ? 0 : 1.0,
+          assignedSite: group.sites[0] || "未指定案場",
+          targetGroupId: '',
+          leaveType: memberLeaveType || ''
+        };
+        hasNewDefaults = true;
+      }
     });
+
+    currentDispatch[group.id] = saved;
   });
+
+  if (!dayData.borrowedInSites) dayData.borrowedInSites = {};
+  BORROWED_IN_ASSIGNED_SITES = dayData.borrowedInSites;
+
+  // 只有第一次建立這一天的預設資料時才需要存檔；沿用舊紀錄的情況不需要重複寫入
+  if (hasNewDefaults) saveDataToLocalStorage();
 }
 
 // 收集借入人員（主管支援他人組別也會同步在目標組別中浮現並能指派案場）
@@ -1327,9 +1357,9 @@ function updateMemberStatus(groupId, member, status) {
   } else {
     m.targetGroupId = '';
   }
+  saveDataToLocalStorage();
   renderUI();
 }
-
 function updateManagerStatus(groupId, status) {
   const m = currentDispatch[groupId].managerStatus;
   if (m.leaveType && (status === 'work' || status === 'half' || status === 'borrow' || status === 'ot1' || status === 'ot15')) {
@@ -1346,6 +1376,7 @@ function updateManagerStatus(groupId, status) {
   } else {
     m.targetGroupId = '';
   }
+  saveDataToLocalStorage();
   renderUI();
 }
 
@@ -1354,6 +1385,7 @@ function updateManagerSite(groupId, newSite) {
     openAddSiteForGroup(groupId);
   } else {
     currentDispatch[groupId].managerStatus.assignedSite = newSite;
+    saveDataToLocalStorage();
     renderUI();
   }
 }
@@ -1363,13 +1395,14 @@ function updateMemberSite(groupId, member, newSite) {
     openAddSiteForGroup(groupId);
   } else {
     currentDispatch[groupId].memberStatus[member].assignedSite = newSite;
+    saveDataToLocalStorage();
     renderUI();
   }
 }
 
-function updateManagerBorrowTarget(groupId, targetGroupId) { currentDispatch[groupId].managerStatus.targetGroupId = targetGroupId; renderUI(); }
-function updateBorrowTargetGroup(groupId, member, targetGroupId) { currentDispatch[groupId].memberStatus[member].targetGroupId = targetGroupId; renderUI(); }
-function updateBorrowedInMemberSite(memberName, site) { BORROWED_IN_ASSIGNED_SITES[memberName] = site; renderUI(); }
+function updateManagerBorrowTarget(groupId, targetGroupId) { currentDispatch[groupId].managerStatus.targetGroupId = targetGroupId; saveDataToLocalStorage(); renderUI(); }
+function updateBorrowTargetGroup(groupId, member, targetGroupId) { currentDispatch[groupId].memberStatus[member].targetGroupId = targetGroupId; saveDataToLocalStorage(); renderUI(); }
+function updateBorrowedInMemberSite(memberName, site) { BORROWED_IN_ASSIGNED_SITES[memberName] = site; saveDataToLocalStorage(); renderUI(); }
 
 // ===== 外部點工登記（依日期各自獨立記錄，與發包人數相同的持久化方式） =====
 function getTempWorkerList(groupId) {
