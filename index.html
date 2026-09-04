@@ -589,7 +589,6 @@ let MONTHLY_LEAVES_DB = JSON.parse(localStorage.getItem("TK_MONTHLY_LEAVES_DB"))
   }
 };
 
-let BORROWED_IN_ASSIGNED_SITES = {};
 let currentDispatch = {};
 let DAILY_DISPATCH_DATA = JSON.parse(localStorage.getItem("TK_DAILY_DISPATCH_DATA")) || {};
 let activeLeaveTypeBrush = "";
@@ -612,7 +611,11 @@ function getLeaveTypeColor(leaveType, kind) {
   return entry[kind || "badge"];
 }
 
+let cloudSyncInFlight = false;
+let localEditedDuringSync = false;
+
 function saveDataToLocalStorage() {
+  if (cloudSyncInFlight) localEditedDuringSync = true;
   localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
   localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
   localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
@@ -646,11 +649,22 @@ function pushStateToCloud() {
 }
 
 // 開啟系統時從 Google 試算表後台讀取最新的組織/人員/排休主檔
+// 重要防呆：抓取雲端資料需要一點時間，這段期間如果使用者已經在畫面上做了任何操作
+// （切換日期、指派案場、標記休假…），代表本機資料已經比這次抓回來的雲端快照更新，
+// 這時候「絕對不能」再用這次的雲端回應去覆蓋，否則剛剛的操作會被沖銷。
 async function loadStateFromCloud() {
   if (!GOOGLE_SCRIPT_URL) return;
+  cloudSyncInFlight = true;
+  localEditedDuringSync = false;
   try {
     const res = await fetch(GOOGLE_SCRIPT_URL + "?action=getAll");
     const data = await res.json();
+
+    if (localEditedDuringSync) {
+      console.warn("讀取雲端資料期間偵測到本機已有新操作，放棄套用這次的雲端快照，避免蓋掉剛剛的變更。");
+      return;
+    }
+
     if (data && Array.isArray(data.groupsData) && data.groupsData.length) {
       GROUPS_DATA = data.groupsData;
     }
@@ -667,6 +681,8 @@ async function loadStateFromCloud() {
     localStorage.setItem("TK_DAILY_DISPATCH_DATA", JSON.stringify(DAILY_DISPATCH_DATA));
   } catch (err) {
     console.warn("雲端資料讀取失敗，暫時使用本機資料：", err);
+  } finally {
+    cloudSyncInFlight = false;
   }
 }
 
@@ -991,18 +1007,17 @@ function initDispatchState() {
     currentDispatch[group.id] = saved;
   });
 
-  if (!dayData.borrowedInSites) dayData.borrowedInSites = {};
-  BORROWED_IN_ASSIGNED_SITES = dayData.borrowedInSites;
-
   // 只有第一次建立這一天的預設資料時才需要存檔；沿用舊紀錄的情況不需要重複寫入
   if (hasNewDefaults) saveDataToLocalStorage();
 }
 
 // 收集借入人員（主管支援他人組別也會同步在目標組別中浮現並能指派案場）
+// 案場資料直接讀寫「原組別」自己的 assignedSite 欄位，跟原組別畫面上「派往哪個案場」是同一份資料，
+// 不管在哪一邊修改，兩邊都會同步更新，也會一起存檔。
 function getBorrowedInMembers(targetGroupId) {
   const list = [];
   const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
-  const defaultSite = targetGroup ? targetGroup.sites[0] : "未指定案場";
+  const defaultSite = targetGroup ? (targetGroup.sites[0] || "未指定案場") : "未指定案場";
 
   GROUPS_DATA.forEach(sourceGroup => {
     if (sourceGroup.id === targetGroupId) return;
@@ -1011,27 +1026,32 @@ function getBorrowedInMembers(targetGroupId) {
 
     const mgrState = sourceState.managerStatus;
     if (mgrState && mgrState.status === 'borrow' && mgrState.targetGroupId === targetGroupId) {
-      const fullName = `${mgrState.name}(${mgrState.title})`;
-      if (!BORROWED_IN_ASSIGNED_SITES[fullName]) BORROWED_IN_ASSIGNED_SITES[fullName] = defaultSite;
-      list.push({ 
-        name: fullName, 
-        fromGroupName: sourceGroup.name, 
-        workRatio: mgrState.workRatio || 1.0, 
-        assignedSite: BORROWED_IN_ASSIGNED_SITES[fullName],
-        leaveType: mgrState.leaveType || ''
+      if (!mgrState.assignedSite) mgrState.assignedSite = defaultSite;
+      list.push({
+        name: `${mgrState.name}(${mgrState.title})`,
+        fromGroupName: sourceGroup.name,
+        workRatio: mgrState.workRatio || 1.0,
+        assignedSite: mgrState.assignedSite,
+        leaveType: mgrState.leaveType || '',
+        sourceGroupId: sourceGroup.id,
+        isManager: true,
+        memberKey: null
       });
     }
 
     sourceGroup.members.forEach(member => {
       const mState = sourceState.memberStatus[member];
       if (mState && mState.status === 'borrow' && mState.targetGroupId === targetGroupId) {
-        if (!BORROWED_IN_ASSIGNED_SITES[member]) BORROWED_IN_ASSIGNED_SITES[member] = defaultSite;
-        list.push({ 
-          name: member, 
-          fromGroupName: sourceGroup.name, 
-          workRatio: mState.workRatio || 1.0, 
-          assignedSite: BORROWED_IN_ASSIGNED_SITES[member],
-          leaveType: mState.leaveType || ''
+        if (!mState.assignedSite) mState.assignedSite = defaultSite;
+        list.push({
+          name: member,
+          fromGroupName: sourceGroup.name,
+          workRatio: mState.workRatio || 1.0,
+          assignedSite: mState.assignedSite,
+          leaveType: mState.leaveType || '',
+          sourceGroupId: sourceGroup.id,
+          isManager: false,
+          memberKey: member
         });
       }
     });
@@ -1099,6 +1119,15 @@ function renderUI() {
                 ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mgrState.targetGroupId === g.id ? 'selected' : ''}>${g.name} (${g.sites.join('/')})</option>`).join('')}
               </select>
             </div>
+            ${mgrState.targetGroupId ? `
+              <div class="flex items-center space-x-1 flex-1 sm:flex-none">
+                <span class="text-[11px] text-purple-700 font-bold">派往:</span>
+                <select onchange="updateManagerBorrowSite('${group.id}', this.value)" 
+                  class="text-xs rounded-lg border border-purple-300 bg-white px-2 py-1 text-purple-900 font-bold flex-1 sm:flex-none">
+                  ${(GROUPS_DATA.find(g => g.id === mgrState.targetGroupId)?.sites || []).map(s => `<option value="${s}" ${mgrState.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
+                </select>
+              </div>
+            ` : ''}
           ` : isMgrOff ? `
             <span class="text-xs px-2 py-0.5 rounded font-bold ${getLeaveTypeColor(mgrState.leaveType, 'badge')}">排定【${mgrState.leaveType || '休假'}】</span>
           ` : `
@@ -1162,6 +1191,15 @@ function renderUI() {
                   ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mState.targetGroupId === g.id ? 'selected' : ''}>${g.name} (${g.sites.join('/')})</option>`).join('')}
                 </select>
               </div>
+              ${mState.targetGroupId ? `
+                <div class="flex items-center space-x-1 flex-1 sm:flex-none">
+                  <span class="text-[11px] text-purple-700 font-bold">派往:</span>
+                  <select onchange="updateMemberBorrowSite('${group.id}', '${member}', this.value)" 
+                    class="text-xs rounded-lg border border-purple-300 bg-white px-2 py-1 text-purple-900 font-bold flex-1 sm:flex-none">
+                    ${(GROUPS_DATA.find(g => g.id === mState.targetGroupId)?.sites || []).map(s => `<option value="${s}" ${mState.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
+                  </select>
+                </div>
+              ` : ''}
             ` : isOff ? `
               <span class="text-xs px-2 py-0.5 rounded font-bold ${getLeaveTypeColor(mState.leaveType, 'badge')}">原排定【${mState.leaveType || '休假'}】</span>
             ` : `
@@ -1194,7 +1232,7 @@ function renderUI() {
           </div>
           <div class="flex items-center space-x-1 flex-1 sm:justify-end">
             <span class="text-[11px] text-purple-800 font-bold">派往:</span>
-            <select onchange="updateBorrowedInMemberSite('${bm.name}', this.value)" class="text-xs font-bold bg-white border border-purple-300 rounded-lg px-2 py-1 text-purple-900 focus:outline-none flex-1 sm:flex-none">
+            <select onchange="updateBorrowedInMemberSite('${bm.sourceGroupId}', ${bm.isManager}, '${bm.memberKey || ''}', this.value)" class="text-xs font-bold bg-white border border-purple-300 rounded-lg px-2 py-1 text-purple-900 focus:outline-none flex-1 sm:flex-none">
               ${group.sites.map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
               ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s} (他場)</option>`).join('')}
             </select>
@@ -1400,9 +1438,40 @@ function updateMemberSite(groupId, member, newSite) {
   }
 }
 
-function updateManagerBorrowTarget(groupId, targetGroupId) { currentDispatch[groupId].managerStatus.targetGroupId = targetGroupId; saveDataToLocalStorage(); renderUI(); }
-function updateBorrowTargetGroup(groupId, member, targetGroupId) { currentDispatch[groupId].memberStatus[member].targetGroupId = targetGroupId; saveDataToLocalStorage(); renderUI(); }
-function updateBorrowedInMemberSite(memberName, site) { BORROWED_IN_ASSIGNED_SITES[memberName] = site; saveDataToLocalStorage(); renderUI(); }
+function updateManagerBorrowTarget(groupId, targetGroupId) {
+  const m = currentDispatch[groupId].managerStatus;
+  m.targetGroupId = targetGroupId;
+  const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
+  if (targetGroup && !targetGroup.sites.includes(m.assignedSite)) {
+    m.assignedSite = targetGroup.sites[0] || "未指定案場";
+  }
+  saveDataToLocalStorage();
+  renderUI();
+}
+function updateBorrowTargetGroup(groupId, member, targetGroupId) {
+  const m = currentDispatch[groupId].memberStatus[member];
+  m.targetGroupId = targetGroupId;
+  const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
+  if (targetGroup && !targetGroup.sites.includes(m.assignedSite)) {
+    m.assignedSite = targetGroup.sites[0] || "未指定案場";
+  }
+  saveDataToLocalStorage();
+  renderUI();
+}
+function updateManagerBorrowSite(groupId, site) { currentDispatch[groupId].managerStatus.assignedSite = site; saveDataToLocalStorage(); renderUI(); }
+function updateMemberBorrowSite(groupId, member, site) { currentDispatch[groupId].memberStatus[member].assignedSite = site; saveDataToLocalStorage(); renderUI(); }
+// 從「借入人員」那一側修改案場時，直接寫回原組別自己的紀錄，兩邊看到的、存檔的都是同一份資料
+function updateBorrowedInMemberSite(sourceGroupId, isManager, memberKey, site) {
+  const sourceState = currentDispatch[sourceGroupId];
+  if (!sourceState) return;
+  if (isManager === true || isManager === 'true') {
+    sourceState.managerStatus.assignedSite = site;
+  } else {
+    sourceState.memberStatus[memberKey].assignedSite = site;
+  }
+  saveDataToLocalStorage();
+  renderUI();
+}
 
 // ===== 外部點工登記（依日期各自獨立記錄，與發包人數相同的持久化方式） =====
 function getTempWorkerList(groupId) {
@@ -1937,9 +2006,9 @@ function sendToGoogleSheet(groupId) {
     records.push({ 
       name: `${mgrState.name}(${mgrState.title})`, 
       role: "主管", 
-      site: mgrState.status === 'borrow' ? `外借支援【${targetG?.name || '他組'}】` : mgrState.assignedSite, 
+      site: mgrState.status === 'borrow' ? `外借【${targetG?.name || '他組'}】📍${mgrState.assignedSite || '未指定'}` : mgrState.assignedSite, 
       workRatio: mgrState.workRatio, 
-      remark: mgrState.status === 'borrow' ? `借至 ${targetG?.name || '他組'} ${overtimeTag}` : `親自出工 ${mgrTypeTag} ${overtimeTag}` 
+      remark: mgrState.status === 'borrow' ? `借至 ${targetG?.name || '他組'} → ${mgrState.assignedSite || '未指定案場'} ${overtimeTag}` : `親自出工 ${mgrTypeTag} ${overtimeTag}` 
     });
   }
 
@@ -1952,9 +2021,9 @@ function sendToGoogleSheet(groupId) {
       records.push({ 
         name: m, 
         role: "本工", 
-        site: s.status === 'borrow' ? `外借支援【${targetG?.name || '他組'}】` : s.assignedSite, 
+        site: s.status === 'borrow' ? `外借【${targetG?.name || '他組'}】📍${s.assignedSite || '未指定'}` : s.assignedSite, 
         workRatio: s.workRatio, 
-        remark: s.status === 'borrow' ? `借至 ${targetG?.name || '他組'} ${overtimeTag}` : `組內派駐 ${memberTypeTag} ${overtimeTag}` 
+        remark: s.status === 'borrow' ? `借至 ${targetG?.name || '他組'} → ${s.assignedSite || '未指定案場'} ${overtimeTag}` : `組內派駐 ${memberTypeTag} ${overtimeTag}` 
       });
     }
   });
@@ -2071,7 +2140,7 @@ function formatSingleGroupData(group) {
       siteAssignments[mgrState.assignedSite].push(`${mgrLabel}(加班1.5工)`);
     } else if (mgrState.status === 'borrow') {
       const targetG = GROUPS_DATA.find(g => g.id === mgrState.targetGroupId);
-      borrowing.push(`${mgrLabel} ➡️ 借至【${targetG?.name || '他組'}】`);
+      borrowing.push(`${mgrLabel} ➡️ 借至【${targetG?.name || '他組'}】📍${mgrState.assignedSite || '未指定案場'}`);
     } else if (mgrState.status === 'off') {
       resting.push(`${mgrState.name}(主管)${mgrState.leaveType ? ' ['+mgrState.leaveType+']' : ''}`);
     }
@@ -2097,7 +2166,7 @@ function formatSingleGroupData(group) {
         siteAssignments[s.assignedSite].push(`${memberLabel}(加班1.5工)`);
       } else if (s.status === 'borrow') {
         const targetG = GROUPS_DATA.find(g => g.id === s.targetGroupId);
-        borrowing.push(`${memberLabel} ➡️ 借至【${targetG?.name || '他組'}】`);
+        borrowing.push(`${memberLabel} ➡️ 借至【${targetG?.name || '他組'}】📍${s.assignedSite || '未指定案場'}`);
       } else if (s.status === 'off') {
         resting.push(`${m}${s.leaveType ? ' ['+s.leaveType+']' : ''}`);
       }
