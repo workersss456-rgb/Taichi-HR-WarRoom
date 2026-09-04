@@ -25,6 +25,7 @@
         <p class="text-[11px] text-slate-400 leading-none flex items-center gap-1.5 mt-0.5" id="headerSubText">
           <span id="cloudStatusBadge" class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
           <span id="cloudStatusText">系統就緒</span>
+          <span id="lastUpdateInfo" class="text-slate-500"></span>
         </p>
       </div>
     </div>
@@ -470,6 +471,10 @@
       <label class="text-xs text-slate-600 font-bold mb-1 block">Google Apps Script Web App URL:</label>
       <input type="text" id="apiInput" placeholder="https://script.google.com/macros/s/.../exec" class="w-full text-xs font-mono border border-slate-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-blue-500 focus:outline-none">
     </div>
+    <div>
+      <label class="text-xs text-slate-600 font-bold mb-1 block">操作人員姓名（顯示在畫面上方「最後更新」旁，方便大家辨識是誰動過資料）:</label>
+      <input type="text" id="operatorNameInput" placeholder="例：王大明" class="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+    </div>
     <div class="flex justify-end space-x-2 pt-2">
       <button onclick="closeApiSettingModal()" class="px-3 py-1.5 border border-slate-300 text-slate-600 text-xs rounded-lg font-medium">取消</button>
       <button onclick="saveApiSetting()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow">儲存設定</button>
@@ -559,7 +564,7 @@ const DEFAULT_GROUPS = [
     name: "信儒組",
     managerName: "黃信儒",
     managerTitle: "副主任",
-    sites: ["環中路", "壁柳七"],
+    sites: ["環中路", "碧柳七", "崇德三"],
     members: ["黃冠傑", "謝泰隆"]
   },
   {
@@ -567,10 +572,39 @@ const DEFAULT_GROUPS = [
     name: "柏翔組",
     managerName: "賴柏翔",
     managerTitle: "總經理",
-    sites: ["V11", "TSMC", "漢口路火鍋店"],
+    sites: ["V11", "TSMC", "漢口路火鍋店", "裕毛屋"],
     members: ["廖文祺", "洪正坤", "張朝傑", "黃清松", "簡承暘"]
   }
 ];
+
+// ===== 各組「正確應有」案場清單（人工確認過的正式名單） =====
+// 用途：不管雲端試算表裡目前存的資料是怎麼來的（可能是很久以前建組別時的舊資料、
+// 也可能中途新增案場忘了幫某組補上），開機讀完雲端資料後都會自動比對這份清單，
+// 缺少的案場會自動補齊，但「不會刪除」使用者後續自行新增的其他案場，只補漏不砍東西。
+const CANONICAL_GROUP_SITES = {
+  boxiang: ["V11", "TSMC", "漢口路火鍋店", "裕毛屋"],
+  tingzhi: ["遠雄"],
+  xianghao: ["榮泉", "沐風", "西苑"],
+  zhixuan: ["紀文娟"],
+  xinru: ["環中路", "碧柳七", "崇德三"]
+};
+
+// 補齊每組案場清單，只新增缺少的，不刪除既有的（含使用者自行新增的案場）
+// 回傳 true 代表有異動（需要重新存檔）
+function reconcileGroupSites() {
+  let changed = false;
+  GROUPS_DATA.forEach(group => {
+    const canonical = CANONICAL_GROUP_SITES[group.id];
+    if (!canonical) return;
+    canonical.forEach(site => {
+      if (!group.sites.includes(site)) {
+        group.sites.push(site);
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
 
 const DEFAULT_SAVED_TEMP_WORKERS = ["粗工-阿強", "水電-老李", "油漆-陳師傅", "泥作-阿明", "粗工-大寶"];
 
@@ -614,6 +648,58 @@ function getLeaveTypeColor(leaveType, kind) {
 let cloudSyncInFlight = false;
 let localEditedDuringSync = false;
 
+// ===== 需求3：多裝置同時操作防呆 + 存檔確認機制 =====
+// SERVER_STATE_VERSION：這台裝置目前手上資料對應到「雲端最後一次存檔」的時間戳記。
+// 每次讀取雲端(loadStateFromCloud)或成功存檔(commitStateToCloud)後都會更新這個值；
+// 之後要做「正式存檔」動作時，會把這個版本一起送給後端比對，藉此判斷存檔的當下
+// 是否已經有其他裝置搶先存過一次新的了。
+let SERVER_STATE_VERSION = null;
+let LAST_UPDATE_META = null; // { updatedAt, updatedBy }
+
+function getOperatorName(fallback) {
+  return localStorage.getItem("TK_OPERATOR_NAME") || fallback || "";
+}
+
+function formatUpdateTime(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts));
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}/${dd} ${hh}:${mi}`;
+}
+
+function updateLastUpdateDisplay(meta) {
+  if (meta) LAST_UPDATE_META = meta;
+  const el = document.getElementById("lastUpdateInfo");
+  if (!el) return;
+  if (!LAST_UPDATE_META || !LAST_UPDATE_META.updatedAt) {
+    el.innerText = "";
+    return;
+  }
+  el.innerText = `｜最後更新：${LAST_UPDATE_META.updatedBy || "未具名使用者"} 於 ${formatUpdateTime(LAST_UPDATE_META.updatedAt)}`;
+}
+
+// 統一的後端連線函式：用一般（非 no-cors）的 fetch 送出，才能讀到後端真正回應的內容，
+// 藉此才有辦法判斷「有沒有存成功」「是否發生多裝置衝突」，而不是像過去 no-cors 那樣送出去就不管了。
+// Content-Type 刻意使用 text/plain，是為了避開瀏覽器對 Google Apps Script 的預檢請求(preflight)，
+// Apps Script 後端本來就是直接讀 e.postData.contents，不受影響。
+async function postToBackend(payload) {
+  if (!GOOGLE_SCRIPT_URL) return null;
+  try {
+    const res = await fetch(GOOGLE_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload)
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("後端連線失敗：", err);
+    return null;
+  }
+}
+
 function saveDataToLocalStorage() {
   if (cloudSyncInFlight) localEditedDuringSync = true;
   localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
@@ -623,29 +709,105 @@ function saveDataToLocalStorage() {
   localStorage.setItem("TK_DAILY_TEMP_WORKERS", JSON.stringify(DAILY_TEMP_WORKERS));
   localStorage.setItem("TK_DAILY_DISPATCH_DATA", JSON.stringify(DAILY_DISPATCH_DATA));
   pushStateToCloud();
+  scheduleDispatchLogAutoSync();
 }
 
-// 即時將組織/人員/排休主檔同步寫入 Google 試算表後台
-function pushStateToCloud() {
+// 即時將組織/人員/排休主檔同步寫入 Google 試算表後台（背景草稿同步，不阻擋畫面操作）
+// 這裡刻意不帶版本比對：每一個小動作（切換下拉選單、輸入文字...）都要求使用者等待確認
+// 會讓畫面變得很卡，體驗不佳；真正需要「等確認存檔成功再繼續」與「多裝置衝突提醒」的，
+// 是下方的 commitStateToCloud()，只用在「儲存」「產出LINE」「送出排休」這幾個明確的送出動作上。
+async function pushStateToCloud() {
   if (!GOOGLE_SCRIPT_URL) return;
-  fetch(GOOGLE_SCRIPT_URL, {
-    method: "POST",
-    mode: "no-cors",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "saveState",
-      groupsData: GROUPS_DATA,
-      savedTempWorkers: SAVED_TEMP_WORKERS,
-      monthlyLeavesDb: MONTHLY_LEAVES_DB,
-      subcontractData: SUBCONTRACT_DATA,
-      dailyTempWorkers: DAILY_TEMP_WORKERS,
-      dailyDispatchData: DAILY_DISPATCH_DATA
-    })
-  }).then(() => {
-    updateCloudBadge(true);
-  }).catch(() => {
-    updateCloudBadge(false);
+  const result = await postToBackend({
+    action: "saveState",
+    groupsData: GROUPS_DATA,
+    savedTempWorkers: SAVED_TEMP_WORKERS,
+    monthlyLeavesDb: MONTHLY_LEAVES_DB,
+    subcontractData: SUBCONTRACT_DATA,
+    dailyTempWorkers: DAILY_TEMP_WORKERS,
+    dailyDispatchData: DAILY_DISPATCH_DATA,
+    operatorName: getOperatorName()
   });
+  if (result && result.status === "ok") {
+    if (result.stateMeta) {
+      SERVER_STATE_VERSION = result.stateMeta.updatedAt;
+      updateLastUpdateDisplay(result.stateMeta);
+    }
+    updateCloudBadge(true);
+  } else {
+    updateCloudBadge(false);
+  }
+}
+
+// 正式「送出」動作專用：等待雲端明確回應成功才算數，並在存檔前比對版本，
+// 偵測到其他裝置已搶先更新過時，回傳 conflict 讓呼叫端決定要重新整理還是強制覆蓋。
+async function commitStateToCloud(force, operatorNameOverride) {
+  if (!GOOGLE_SCRIPT_URL) return { ok: true }; // 尚未設定雲端試算表時，視同離線模式，不阻擋操作
+  const result = await postToBackend({
+    action: "saveState",
+    groupsData: GROUPS_DATA,
+    savedTempWorkers: SAVED_TEMP_WORKERS,
+    monthlyLeavesDb: MONTHLY_LEAVES_DB,
+    subcontractData: SUBCONTRACT_DATA,
+    dailyTempWorkers: DAILY_TEMP_WORKERS,
+    dailyDispatchData: DAILY_DISPATCH_DATA,
+    operatorName: operatorNameOverride || getOperatorName(),
+    clientVersion: SERVER_STATE_VERSION,
+    force: !!force
+  });
+
+  if (!result) {
+    updateCloudBadge(false);
+    return { ok: false, reason: "network" };
+  }
+  if (result.status === "conflict") {
+    return { ok: false, reason: "conflict", serverMeta: result.serverMeta };
+  }
+  if (result.status === "ok") {
+    if (result.stateMeta) {
+      SERVER_STATE_VERSION = result.stateMeta.updatedAt;
+      updateLastUpdateDisplay(result.stateMeta);
+    }
+    updateCloudBadge(true);
+    return { ok: true };
+  }
+  updateCloudBadge(false);
+  return { ok: false, reason: "unknown" };
+}
+
+// 包一層給「儲存/產出LINE/送出排休」等明確送出動作使用：
+// 存檔前先問過雲端「有沒有人比我先存過」，若有衝突就跳出提醒讓使用者自己決定，
+// 而不是在使用者完全不知情的狀況下悄悄覆蓋掉別人剛做的異動。
+async function ensureSavedBeforeProceed(operatorNameOverride) {
+  let result = await commitStateToCloud(false, operatorNameOverride);
+  if (result.ok) return true;
+
+  if (result.reason === "conflict") {
+    const who = result.serverMeta ? result.serverMeta.updatedBy : "其他使用者";
+    const when = result.serverMeta ? formatUpdateTime(result.serverMeta.updatedAt) : "剛剛";
+    const wantForce = confirm(
+      `⚠️ 偵測到【${who}】已於 ${when} 更新過派工資料。\n\n` +
+      `若繼續儲存，將會覆蓋對方剛剛的異動！\n\n` +
+      `按「確定」＝我了解風險，仍要用目前畫面內容強制覆蓋。\n` +
+      `按「取消」＝先不存檔，我要重新整理查看最新資料。`
+    );
+    if (wantForce) {
+      result = await commitStateToCloud(true, operatorNameOverride);
+      if (result.ok) return true;
+      alert("儲存失敗，請確認網路連線後再試一次！");
+      return false;
+    } else {
+      alert("已取消本次儲存。即將為您重新整理最新的雲端資料，請重新確認畫面內容後再存一次。");
+      await loadStateFromCloud();
+      initDispatchState();
+      renderUI();
+      if (!document.getElementById("view_confirm").classList.contains("hidden")) renderConfirmView();
+      return false;
+    }
+  }
+
+  alert("⚠️ 儲存失敗，請檢查網路連線或 Google 試算表設定是否正常，稍後再試一次！");
+  return false;
 }
 
 // 開啟系統時從 Google 試算表後台讀取最新的組織/人員/排休主檔
@@ -673,6 +835,15 @@ async function loadStateFromCloud() {
     if (data && data.subcontractData) SUBCONTRACT_DATA = data.subcontractData;
     if (data && data.dailyTempWorkers) DAILY_TEMP_WORKERS = data.dailyTempWorkers;
     if (data && data.dailyDispatchData) DAILY_DISPATCH_DATA = data.dailyDispatchData;
+    if (data && data.stateMeta) {
+      SERVER_STATE_VERSION = data.stateMeta.updatedAt;
+      updateLastUpdateDisplay(data.stateMeta);
+    }
+    // 補齊各組案場清單（需求2）：讀完雲端資料後立刻比對正確名單，缺哪個案場就自動補上，
+    // 不會刪除既有／使用者自行新增的案場。有異動的話直接回存，讓雲端從此成為穩定一致的來源。
+    if (reconcileGroupSites()) {
+      saveDataToLocalStorage();
+    }
     localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
     localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
     localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
@@ -1146,7 +1317,7 @@ function renderUI() {
               <select onchange="updateManagerBorrowTarget('${group.id}', this.value)" 
                 class="text-xs rounded-lg border border-purple-300 bg-purple-50 px-2 py-1 text-purple-900 font-bold flex-1 sm:flex-none">
                 <option value="">選擇借給哪組...</option>
-                ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mgrState.targetGroupId === g.id ? 'selected' : ''}>${g.name} (${g.sites.join('/')})</option>`).join('')}
+                ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mgrState.targetGroupId === g.id ? 'selected' : ''}>${g.name}</option>`).join('')}
               </select>
             </div>
             ${mgrState.targetGroupId ? `
@@ -1217,7 +1388,7 @@ function renderUI() {
                 <select onchange="updateBorrowTargetGroup('${group.id}', '${member}', this.value)" 
                   class="text-xs rounded-lg border border-purple-300 bg-purple-50 px-2 py-1 text-purple-900 font-bold flex-1 sm:flex-none">
                   <option value="">選擇借給哪組...</option>
-                  ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mState.targetGroupId === g.id ? 'selected' : ''}>${g.name} (${g.sites.join('/')})</option>`).join('')}
+                  ${GROUPS_DATA.filter(g => g.id !== group.id).map(g => `<option value="${g.id}" ${mState.targetGroupId === g.id ? 'selected' : ''}>${g.name}</option>`).join('')}
                 </select>
               </div>
               ${mState.targetGroupId ? `
@@ -1986,39 +2157,53 @@ function applyLeaveToDay(dateKey) {
   renderLeaveCalendar();
 }
 
-function submitMonthlyLeave() {
+async function submitMonthlyLeave() {
   const memberName = document.getElementById("leaveMemberSelect").value;
   const month = getSelectedLeaveYearMonth();
   if (!memberName) return alert("請先選取姓名！");
+
+  const submitBtn = document.querySelector('button[onclick="submitMonthlyLeave()"]');
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerText = "送出中，請稍候...";
+  }
 
   if (!MONTHLY_LEAVES_DB[month]) MONTHLY_LEAVES_DB[month] = {};
   MONTHLY_LEAVES_DB[month][memberName] = currentMemberLeaves;
   saveDataToLocalStorage();
 
-  const leavesPayload = Object.keys(currentMemberLeaves).map(d => ({ date: d, type: currentMemberLeaves[d], remark: "" }));
+  // 需求3：確認雲端明確存好（含多裝置衝突偵測，例如兩位同仁同時送出排休）才提示成功。
+  // 這裡把操作人員名稱帶成員工自己選取的姓名，方便主管在「最後更新」看到是哪位同仁剛送出。
+  const savedOk = await ensureSavedBeforeProceed(memberName);
 
-  if (GOOGLE_SCRIPT_URL) {
-    fetch(GOOGLE_SCRIPT_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "submitLeave", memberName: memberName, yearMonth: month, leaves: leavesPayload })
-    });
+  if (savedOk) {
+    const leavesPayload = Object.keys(currentMemberLeaves).map(d => ({ date: d, type: currentMemberLeaves[d], remark: "" }));
+    const logResult = await postToBackend({ action: "submitLeave", memberName: memberName, yearMonth: month, leaves: leavesPayload });
+    if (logResult && logResult.status === "ok") {
+      alert(`✅【${memberName}】${month} 排休已成功送出並同步雲端！`);
+    } else {
+      alert(`⚠️ 排休主檔已存檔，但寫入「排休紀錄」歷史分頁時似乎沒有成功，請稍後重新整理確認一次，或再送出一次！`);
+    }
   }
 
-  alert(`✅【${memberName}】${month} 排休已成功送出並同步雲端！`);
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = `<i data-lucide="send" class="w-4 h-4 mr-1.5"></i> 送出並儲存本月排休表`;
+    lucide.createIcons();
+  }
+
   initDispatchState();
   renderUI();
 }
 
 // 雲端同步派工
-function sendToGoogleSheet(groupId) {
+async function sendToGoogleSheet(groupId) {
   const date = document.getElementById("dispatchDate").value;
   const group = GROUPS_DATA.find(g => g.id === groupId);
-  if (!group) return;
+  if (!group) return false;
 
   const state = currentDispatch[groupId];
-  if (!state) return;
+  if (!state) return false;
 
   const mgrState = state.managerStatus;
   const borrowedInList = getBorrowedInMembers(groupId);
@@ -2059,28 +2244,59 @@ function sendToGoogleSheet(groupId) {
   const subcontractList = getSubcontractList(groupId);
   subcontractList.forEach(sc => records.push({ name: sc.vendor, role: "發包", site: sc.site, workRatio: sc.count, remark: `工項:${sc.workItem || '未填寫'}／發包人數:${sc.count}人（不計入本工工數）` }));
 
-  if (GOOGLE_SCRIPT_URL) {
-    fetch(GOOGLE_SCRIPT_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "dispatch", date: date, groupId: group.id, groupName: group.name, managerName: `${group.managerName} ${group.managerTitle}`, records: records })
-    });
+  if (!GOOGLE_SCRIPT_URL) return true;
+  const result = await postToBackend({ action: "dispatch", date: date, groupId: group.id, groupName: group.name, managerName: `${group.managerName} ${group.managerTitle}`, records: records });
+  return !!(result && result.status === "ok");
+}
+
+// 需求3（防呆 a）：每次派工狀態有任何異動時，自動（防抖 1.5 秒）把「派工紀錄」永久分頁也一併補上最新內容，
+// 不再需要仰賴管理者記得手動按「儲存」或「產出LINE派工文字」才會留下正式紀錄，避免忘記存檔而導致紀錄消失。
+let dispatchLogSyncTimer = null;
+function scheduleDispatchLogAutoSync() {
+  if (dispatchLogSyncTimer) clearTimeout(dispatchLogSyncTimer);
+  dispatchLogSyncTimer = setTimeout(() => {
+    dispatchLogSyncTimer = null;
+    GROUPS_DATA.forEach(g => { sendToGoogleSheet(g.id); });
+  }, 1500);
+}
+// 換日期／關閉頁面等時機，立刻補送一次，不要讓最後一筆異動卡在防抖計時器裡來不及送出
+function flushDispatchLogAutoSync() {
+  if (dispatchLogSyncTimer) {
+    clearTimeout(dispatchLogSyncTimer);
+    dispatchLogSyncTimer = null;
+    GROUPS_DATA.forEach(g => { sendToGoogleSheet(g.id); });
   }
 }
 
-function saveGroupData(groupId) {
-  sendToGoogleSheet(groupId);
+async function saveGroupData(groupId) {
   const btn = document.getElementById(`saveBtn_${groupId}`);
   const orig = btn.innerHTML;
-  btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 mr-1 text-emerald-400"></i> 已同步雲端！`;
-  btn.className = "w-1/3 bg-emerald-800 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition";
+  btn.disabled = true;
+  btn.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 mr-1 animate-spin"></i> 儲存中...`;
+  btn.className = "bg-slate-500 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition cursor-wait";
   lucide.createIcons();
-  setTimeout(() => { btn.innerHTML = orig; btn.className = "w-1/3 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition"; lucide.createIcons(); }, 2000);
+
+  const savedOk = await ensureSavedBeforeProceed();
+  if (savedOk) {
+    await sendToGoogleSheet(groupId);
+    btn.innerHTML = `<i data-lucide="check" class="w-3.5 h-3.5 mr-1 text-emerald-400"></i> 已同步雲端！`;
+    btn.className = "bg-emerald-800 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition";
+  } else {
+    btn.innerHTML = `<i data-lucide="cloud-upload" class="w-3.5 h-3.5 mr-1 text-blue-400"></i> 儲存`;
+    btn.className = "bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition";
+  }
+  btn.disabled = false;
+  lucide.createIcons();
+  setTimeout(() => { btn.innerHTML = orig; btn.className = "bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition"; lucide.createIcons(); }, 2000);
 }
 
 // 產出 LINE 訊息 (整合圖文卡片美化預覽 + 純文字版)
-function generateLineMessage(targetGroupId) {
+async function generateLineMessage(targetGroupId) {
+  // 需求3：跟儲存按鈕一樣，產出LINE文字前也先確認雲端存檔成功（含多裝置衝突偵測），
+  // 確認沒問題才繼續往下產出通知內容，避免用舊資料或即將被覆蓋的資料產出通知。
+  const savedOk = await ensureSavedBeforeProceed();
+  if (!savedOk) return;
+
   const date = document.getElementById("dispatchDate").value;
   let rawOutput = "";
   const cardContainer = document.getElementById("lineCardPreview");
@@ -2097,12 +2313,12 @@ function generateLineMessage(targetGroupId) {
     rawOutput = `【${group.name} 每日派工通知】\n日期：${date}\n\n`;
   }
 
-  groupsToProcess.forEach(group => {
+  for (const group of groupsToProcess) {
     const { rawText, cardHTML } = formatSingleGroupData(group);
     rawOutput += rawText;
     cardContainer.innerHTML += cardHTML;
-    sendToGoogleSheet(group.id);
-  });
+    await sendToGoogleSheet(group.id);
+  }
 
   rawOutput += `\n⚠️【重要提醒】\n請全體同仁於明日準時抵達指定案場；如有出勤異動請即時回報直轄主管！`;
 
@@ -2355,11 +2571,17 @@ function copyToClipboard() {
   t.select();
   navigator.clipboard.writeText(t.value).then(() => { document.getElementById("copyHint").innerText = "✅ 已成功複製純文字至剪貼簿！可直接至 LINE 貼上發送"; });
 }
-function openApiSettingModal() { document.getElementById("apiInput").value = GOOGLE_SCRIPT_URL; document.getElementById("apiSettingModal").classList.remove("hidden"); }
+function openApiSettingModal() {
+  document.getElementById("apiInput").value = GOOGLE_SCRIPT_URL;
+  document.getElementById("operatorNameInput").value = getOperatorName();
+  document.getElementById("apiSettingModal").classList.remove("hidden");
+}
 function closeApiSettingModal() { document.getElementById("apiSettingModal").classList.add("hidden"); }
 async function saveApiSetting() {
   GOOGLE_SCRIPT_URL = document.getElementById("apiInput").value.trim();
   localStorage.setItem("TK_GOOGLE_SCRIPT_URL", GOOGLE_SCRIPT_URL);
+  const operatorName = document.getElementById("operatorNameInput").value.trim();
+  localStorage.setItem("TK_OPERATOR_NAME", operatorName);
   closeApiSettingModal();
   if (GOOGLE_SCRIPT_URL) {
     await loadStateFromCloud();
@@ -2560,10 +2782,18 @@ function handleLeaveImportFile(event) {
   reader.readAsArrayBuffer(file);
 }
 
-document.getElementById("dispatchDate").addEventListener("change", () => { initDispatchState(); renderUI(); });
+document.getElementById("dispatchDate").addEventListener("change", () => {
+  flushDispatchLogAutoSync();
+  initDispatchState();
+  renderUI();
+});
+
+// 使用者要離開/關閉頁面前，盡量把還沒送出的派工紀錄補寫送出（best-effort，瀏覽器不保證一定能完成）
+window.addEventListener("beforeunload", () => { flushDispatchLogAutoSync(); });
 
 window.onload = async function() {
   // 先用本機快取資料立即畫面渲染，畫面不用乾等 Google 試算表回應
+  if (reconcileGroupSites()) saveDataToLocalStorage();
   initDispatchState();
   renderUI();
   updateCloudBadge();
