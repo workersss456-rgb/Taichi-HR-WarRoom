@@ -952,6 +952,27 @@ function renderConfirmView() {
   lucide.createIcons();
 }
 
+// 每天的派工/點工/發包資料如果永遠不清，JSON 會一直長大，最後可能撐爆 Google 試算表單一
+// 儲存格的容量上限而整個存檔失敗。這裡只保留「最近 90 天內」的資料在這份即時同步的 JSON 裡；
+// 更久以前的資料，正式的歷史紀錄已經另外存在「派工紀錄」「排休紀錄」分頁裡，不會因此遺失。
+const DAILY_DATA_RETENTION_DAYS = 90;
+function pruneOldDailyData() {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - DAILY_DATA_RETENTION_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  let pruned = false;
+  [DAILY_DISPATCH_DATA, DAILY_TEMP_WORKERS, SUBCONTRACT_DATA].forEach(obj => {
+    Object.keys(obj).forEach(dateKey => {
+      if (dateKey < cutoffStr) {
+        delete obj[dateKey];
+        pruned = true;
+      }
+    });
+  });
+  if (pruned) saveDataToLocalStorage();
+}
+
 // 派工資料初始化與防呆
 // 重要：這裡「絕對不能」對已經存在的當日派工紀錄做覆蓋——只補上「當天還沒有紀錄」的
 // 主管/成員預設值（例如全新的一天、或新加入名冊的成員），已經指派過的案場、狀態一律保留原樣。
@@ -987,6 +1008,11 @@ function initDispatchState() {
       // 姓名/職稱以最新名冊為準，避免改名後派工卡片顯示舊資料
       saved.managerStatus.name = group.managerName;
       saved.managerStatus.title = group.managerTitle;
+      // 防呆：非外借狀態的人，案場一律只能是自己組的案場；如果是改規則前留下的舊資料
+      // （曾經被指到別組案場），這裡自動導正回本組第一個案場，避免畫面出現不合規則的選項。
+      if (saved.managerStatus.status !== 'borrow' && !group.sites.includes(saved.managerStatus.assignedSite)) {
+        saved.managerStatus.assignedSite = group.sites[0] || "未指定案場";
+      }
     }
 
     group.members.forEach(m => {
@@ -1001,6 +1027,11 @@ function initDispatchState() {
           leaveType: memberLeaveType || ''
         };
         hasNewDefaults = true;
+      } else {
+        const ms = saved.memberStatus[m];
+        if (ms.status !== 'borrow' && !group.sites.includes(ms.assignedSite)) {
+          ms.assignedSite = group.sites[0] || "未指定案場";
+        }
       }
     });
 
@@ -1062,7 +1093,6 @@ function getBorrowedInMembers(targetGroupId) {
 function renderUI() {
   const container = document.getElementById("groupsContainer");
   container.innerHTML = "";
-  const allSites = getAllSitesList();
 
   GROUPS_DATA.forEach(group => {
     const state = currentDispatch[group.id];
@@ -1135,7 +1165,6 @@ function renderUI() {
               <span class="text-[11px] text-slate-500 font-medium">派往:</span>
               <select onchange="updateManagerSite('${group.id}', this.value)" class="text-xs font-bold bg-white border border-blue-300 rounded-lg px-2 py-1 text-blue-800 focus:outline-none flex-1 sm:flex-none">
                 ${group.sites.map(s => `<option value="${s}" ${mgrState.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
-                ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}" ${mgrState.assignedSite === s ? 'selected' : ''}>${s} (他場)</option>`).join('')}
                 <option value="__ADD_NEW__" class="text-blue-600 font-bold">➕ 新增案場...</option>
               </select>
             </div>
@@ -1207,7 +1236,6 @@ function renderUI() {
                 <span class="text-[11px] text-slate-400">派往:</span>
                 <select onchange="updateMemberSite('${group.id}', '${member}', this.value)" class="text-xs font-bold bg-slate-50 border border-slate-300 rounded-lg px-2 py-1 text-blue-700 focus:outline-none flex-1 sm:flex-none">
                   ${group.sites.map(s => `<option value="${s}" ${mState.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
-                  ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}" ${mState.assignedSite === s ? 'selected' : ''}>${s} (他場)</option>`).join('')}
                   <option value="__ADD_NEW__" class="text-blue-600 font-bold">➕ 新增案場...</option>
                 </select>
               </div>
@@ -1234,7 +1262,6 @@ function renderUI() {
             <span class="text-[11px] text-purple-800 font-bold">派往:</span>
             <select onchange="updateBorrowedInMemberSite('${bm.sourceGroupId}', ${bm.isManager}, '${bm.memberKey || ''}', this.value)" class="text-xs font-bold bg-white border border-purple-300 rounded-lg px-2 py-1 text-purple-900 focus:outline-none flex-1 sm:flex-none">
               ${group.sites.map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s}</option>`).join('')}
-              ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}" ${bm.assignedSite === s ? 'selected' : ''}>${s} (他場)</option>`).join('')}
             </select>
           </div>
         </div>
@@ -1318,7 +1345,6 @@ function renderUI() {
 
               <select id="twSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
                 ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
-                ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}">${s}</option>`).join('')}
               </select>
 
               <select id="twRatio_${group.id}" class="text-xs border border-slate-300 rounded-lg px-1.5 py-1.5 bg-white text-slate-700">
@@ -1341,7 +1367,6 @@ function renderUI() {
               <input type="text" id="scItem_${group.id}" placeholder="工項(手動輸入)" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
               <select id="scSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
                 ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
-                ${allSites.filter(s => !group.sites.includes(s)).map(s => `<option value="${s}">${s}</option>`).join('')}
               </select>
               <input type="number" id="scCount_${group.id}" min="1" value="1" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-16 text-center">
               <button onclick="addSubcontractEntry('${group.id}')" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
@@ -2557,6 +2582,7 @@ window.onload = async function() {
 
   // 背景向雲端拉取最新資料，拉到後才悄悄更新畫面，使用者不需要盯著白畫面等
   await loadStateFromCloud();
+  pruneOldDailyData();
   initDispatchState();
   renderUI();
   updateCloudBadge();
