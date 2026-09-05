@@ -1,94 +1,162 @@
-accept=".xlsx, .xls" class="block w-full text-sm text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer border border-slate-300 rounded-lg bg-white">
-    </div>
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>太綺工程 - 智慧派工調度與員工排休系統</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@1.39.0"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas-pro@2.4.1/dist/html2canvas-pro.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;900&display=swap');
+  body { font-family: 'Noto Sans TC', sans-serif; -webkit-tap-highlight-color: transparent; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen pb-16">
 
-    <div class="flex justify-end space-x-2 pt-2 border-t border-slate-100">
-      <button onclick="closeImportLeaveModal()" class="px-3 py-1.5 border border-slate-300 hover:bg-slate-50 text-slate-600 text-xs rounded-lg font-medium transition">取消</button>
-      <button onclick="processLeaveImport()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow transition flex items-center">
-        <i data-lucide="check" class="w-3.5 h-3.5 mr-1"></i> 確認匯入
+<!-- 頂部導覽列 -->
+<header class="bg-slate-900 text-white shadow-md sticky top-0 z-40">
+  <div class="max-w-7xl mx-auto px-3 sm:px-4 py-3 flex flex-wrap justify-between items-center gap-2">
+    <div class="flex items-center space-x-2.5">
+      <div class="bg-blue-600 px-2 py-1 rounded text-white font-black text-sm tracking-wider">太綺</div>
+      <div>
+        <h1 class="text-sm sm:text-base font-bold tracking-wide leading-tight" id="headerTitle">案場智慧派工與排休系統</h1>
+        <p class="text-[11px] text-slate-400 leading-none flex items-center gap-1.5 mt-0.5" id="headerSubText">
+          <span id="cloudStatusBadge" class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span id="cloudStatusText">系統就緒</span>
+          <span id="lastUpdateInfo" class="text-slate-500"></span>
+        </p>
+      </div>
+    </div>
+    
+    <!-- 主管專用操作區 -->
+    <div id="managerControls" class="flex flex-wrap items-center gap-2">
+      <div class="flex items-center bg-slate-800 rounded-xl p-1 border border-slate-700">
+        <button type="button" onclick="showShareUrlModal('leave')" class="px-2.5 py-1 text-xs font-bold rounded-lg text-amber-400 hover:bg-slate-700 active:bg-slate-600 transition flex items-center">
+          <i data-lucide="link" class="w-3.5 h-3.5 mr-1"></i> 取得員工排休連結
+        </button>
+        <button type="button" onclick="showShareUrlModal('manager')" class="px-2.5 py-1 text-xs font-bold rounded-lg text-blue-400 hover:bg-slate-700 active:bg-slate-600 transition flex items-center">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5 mr-1"></i> 取得主管連結
+        </button>
+      </div>
+
+      <div class="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
+        <button onclick="switchTab('dispatch')" id="tabBtn_dispatch" class="px-3 py-1 text-xs font-bold rounded-lg bg-blue-600 text-white transition">
+          主管每日派工
+        </button>
+        <button onclick="switchTab('confirm')" id="tabBtn_confirm" class="px-3 py-1 text-xs font-bold rounded-lg text-slate-400 hover:text-white transition">
+          每日排班確認
+        </button>
+        <button onclick="switchTab('leave')" id="tabBtn_leave" class="px-3 py-1 text-xs font-bold rounded-lg text-slate-400 hover:text-white transition">
+          員工月曆排休
+        </button>
+        <button onclick="openApiSettingModal()" class="ml-1 px-2 py-1 text-xs text-slate-400 hover:text-white" title="設定後台 Google 試算表">
+          <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+
+      <button type="button" onclick="openImportLeaveModal()" class="bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-xl shadow transition flex items-center" title="批量匯入員工排班 Excel">
+        <i data-lucide="file-spreadsheet" class="w-3.5 h-3.5 mr-1"></i> 批量匯入排班
       </button>
     </div>
   </div>
+</header>
+
+<!-- 分頁一：主管每日派工調度頁面 -->
+<div id="view_dispatch" class="space-y-4">
+  <div class="max-w-7xl mx-auto px-3 sm:px-4 pt-4 flex flex-wrap justify-between items-center gap-2">
+    <div class="flex flex-wrap items-center gap-2">
+      <div class="flex items-center bg-white rounded-xl px-3 py-1.5 shadow-sm border border-slate-200">
+        <i data-lucide="calendar" class="w-4 h-4 text-blue-600 mr-2"></i>
+        <span class="text-xs text-slate-500 font-bold mr-2">派工日期:</span>
+        <input type="date" id="dispatchDate" class="text-xs font-bold bg-transparent text-slate-800 focus:outline-none cursor-pointer">
+      </div>
+      
+      <button onclick="openCreateGroupModal()" class="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold px-3 py-2 rounded-xl shadow transition flex items-center">
+        <i data-lucide="folder-plus" class="w-3.5 h-3.5 mr-1 text-blue-400"></i> ➕ 成立新組別
+      </button>
+      <button onclick="openAddSiteGlobalModal()" class="bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold px-3 py-2 rounded-xl border border-slate-300 shadow-sm transition flex items-center">
+        <i data-lucide="map-pin" class="w-3.5 h-3.5 mr-1 text-emerald-600"></i> ➕ 新增案場
+      </button>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <button onclick="generateLineMessage('ALL')" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded-xl shadow transition flex items-center">
+        <i data-lucide="layers" class="w-3.5 h-3.5 mr-1"></i> 全公司派工彙整
+      </button>
+      <button onclick="exportNodeAsJpg('dispatchExportArea', '每日派工_' + document.getElementById('dispatchDate').value)" class="bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold px-3 py-2 rounded-xl border border-slate-300 shadow-sm transition flex items-center">
+        <i data-lucide="image-down" class="w-3.5 h-3.5 mr-1 text-blue-600"></i> 另存圖片(jpg)
+      </button>
+    </div>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-3 sm:px-4 space-y-4" id="dispatchExportArea">
+    <!-- 今日即時統計看板 -->
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 sm:gap-4">
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">總編制本工</p>
+          <p class="text-xl sm:text-2xl font-black text-slate-800" id="totalMembers">22 人</p>
+        </div>
+        <div class="p-2.5 bg-blue-50 text-blue-600 rounded-lg"><i data-lucide="users" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">今日排休 / 請假</p>
+          <p class="text-xl sm:text-2xl font-black text-amber-600" id="totalOffCount">0 人</p>
+        </div>
+        <div class="p-2.5 bg-amber-50 text-amber-600 rounded-lg"><i data-lucide="calendar-x" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">今日出勤本工</p>
+          <p class="text-xl sm:text-2xl font-black text-emerald-600" id="totalWorkCount">0 工</p>
+        </div>
+        <div class="p-2.5 bg-emerald-50 text-emerald-600 rounded-lg"><i data-lucide="hard-hat" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">外部點工總計</p>
+          <p class="text-xl sm:text-2xl font-black text-purple-600" id="totalTempCount">0 工</p>
+        </div>
+        <div class="p-2.5 bg-purple-50 text-purple-600 rounded-lg"><i data-lucide="user-plus" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+      <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+        <div>
+          <p class="text-[11px] text-slate-500 font-medium">今日發包人數</p>
+          <p class="text-xl sm:text-2xl font-black text-cyan-600" id="totalSubcontractCount">0 人</p>
+        </div>
+        <div class="p-2.5 bg-cyan-50 text-cyan-600 rounded-lg"><i data-lucide="hard-hat" class="w-4 h-4 sm:w-5 sm:h-5"></i></div>
+      </div>
+    </div>
+
+    <!-- 各組別派工卡片列表 -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="groupsContainer"></div>
+  </main>
 </div>
 
-<!-- 系統提示與載入遮罩 -->
-<div id="loadingOverlay" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[60] flex flex-col items-center justify-center hidden">
-  <div class="animate-spin rounded-full h-10 w-10 border-4 border-blue-500 border-t-transparent mb-3"></div>
-  <p class="text-white font-bold text-sm tracking-wide" id="loadingText">系統處理中，請稍候...</p>
-</div>
+<!-- 分頁二：每日排班確認總覽 -->
+<div id="view_confirm" class="hidden max-w-4xl mx-auto px-3 sm:px-4 pt-4 space-y-4">
+  <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-6 space-y-4">
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+      <h2 class="text-base font-bold text-slate-900 flex items-center">
+        <i data-lucide="calendar-check-2" class="w-5 h-5 text-blue-600 mr-2"></i> 每日排班確認
+      </h2>
+      <div class="flex items-center gap-2">
+        <button onclick="changeConfirmDate(-1)" class="p-2 bg-slate-100 hover:bg-slate-200 rounded-xl transition" title="前一天">
+          <i data-lucide="chevron-left" class="w-4 h-4 text-slate-700"></i>
+        </button>
+        <input type="date" id="confirmDate" onchange="onConfirmDateChange()" class="text-sm font-bold border border-slate-300 rounded-xl px-3 py-1.5 bg-slate-50 text-slate-800 focus:outline-none">
+        <button onclick="changeConfirmDate(1)" class="p-2 bg-slate-100 hover:bg-slate-200 rounded-xl transition" title="後一天">
+          <i data-lucide="chevron-right" class="w-4 h-4 text-slate-700"></i>
+        </button>
+        <button onclick="goToTodayConfirm()" class="px-2.5 py-1.5 text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white rounded-xl transition">今天</button>
+        <button onclick="exportNodeAsJpg('confirmExportArea', '每日排班確認_' + document.getElementById('confirmDate').value)" class="px-2.5 py-1.5 text-xs font-bold bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl shadow-sm transition flex items-center">
+          <i data-lucide="image-down" class="w-3.5 h-3.5 mr-1 text-blue-600"></i> 另存圖片(jpg)
+        </button>
+      </div>
+    </div>
 
-<!-- 核心 JavaScript 邏輯 (UI與基礎互動) -->
-<script>
-  // 1. 啟動並渲染 Lucide Icons
-  lucide.createIcons();
-
-  // 2. 基礎分頁切換邏輯
-  function switchTab(tabId) {
-    // 隱藏所有視圖
-    document.getElementById('view_dispatch').classList.add('hidden');
-    document.getElementById('view_confirm').classList.add('hidden');
-    document.getElementById('view_leave').classList.add('hidden');
-    
-    // 顯示目標視圖
-    document.getElementById('view_' + tabId).classList.remove('hidden');
-
-    // 重置所有按鈕樣式
-    const tabs = ['dispatch', 'confirm', 'leave'];
-    tabs.forEach(tab => {
-      const btn = document.getElementById('tabBtn_' + tab);
-      if (btn) {
-        btn.classList.remove('bg-blue-600', 'text-white');
-        btn.classList.add('text-slate-400');
-      }
-    });
-
-    // 啟用當前按鈕樣式
-    const activeBtn = document.getElementById('tabBtn_' + tabId);
-    if (activeBtn) {
-      activeBtn.classList.remove('text-slate-400');
-      activeBtn.classList.add('bg-blue-600', 'text-white');
-    }
-  }
-
-  // 3. Modal 開關通用邏輯
-  function openModal(modalId) {
-    document.getElementById(modalId).classList.remove('hidden');
-  }
-  
-  function closeModal(modalId) {
-    document.getElementById(modalId).classList.add('hidden');
-  }
-
-  // 各別 Modal 的開關封裝
-  function openImportLeaveModal() { openModal('importLeaveModal'); }
-  function closeImportLeaveModal() { closeModal('importLeaveModal'); }
-  
-  function openApiSettingModal() { openModal('apiSettingModal'); }
-  function closeApiSettingModal() { closeModal('apiSettingModal'); }
-  
-  function openCreateGroupModal() { openModal('createGroupModal'); }
-  function closeCreateGroupModal() { closeModal('createGroupModal'); }
-  
-  function openAddSiteGlobalModal() { openModal('addSiteModal'); }
-  function closeSiteModal() { closeModal('addSiteModal'); }
-  
-  function openAddMemberModal() { openModal('addMemberModal'); }
-  function closeAddMemberModal() { closeModal('addMemberModal'); }
-
-  function showShareUrlModal(type) { openModal('shareUrlModal'); }
-  function closeShareUrlModal() { closeModal('shareUrlModal'); }
-
-  // 4. 初始化日期
-  document.addEventListener('DOMContentLoaded', () => {
-    const today = new Date().toISOString().split('T')[0];
-    const dispatchDateInput = document.getElementById('dispatchDate');
-    const confirmDateInput = document.getElementById('confirmDate');
-    
-    if (dispatchDateInput) dispatchDateInput.value = today;
-    if (confirmDateInput) confirmDateInput.value = today;
-  });
-
-  // (其餘業務邏輯：Google Apps Script API 串接、日曆渲染、匯入匯出處理，請在此補上)
-</script>
-
-</body>
-</html>
+    <div id="confirmExportArea" class="space-y-3">
+      <
