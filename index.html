@@ -70,10 +70,10 @@
         🔒 鎖定當日排班
       </button>
 
-      <button onclick="openCreateGroupModal()" class="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold px-3 py-2 rounded-xl shadow transition flex items-center">
+      <button onclick="openCreateGroupModal()" class="dispatch-control bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold px-3 py-2 rounded-xl shadow transition flex items-center">
         <i data-lucide="folder-plus" class="w-3.5 h-3.5 mr-1 text-blue-400"></i> ➕ 成立新組別
       </button>
-      <button onclick="openAddSiteGlobalModal()" class="bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold px-3 py-2 rounded-xl border border-slate-300 shadow-sm transition flex items-center">
+      <button onclick="openAddSiteGlobalModal()" class="dispatch-control bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold px-3 py-2 rounded-xl border border-slate-300 shadow-sm transition flex items-center">
         <i data-lucide="map-pin" class="w-3.5 h-3.5 mr-1 text-emerald-600"></i> ➕ 新增案場
       </button>
     </div>
@@ -271,7 +271,23 @@
   lucide.createIcons();
 
   let AppState = {
-    groupsData: [],
+    groupsData: [
+      {
+        id: 'g1',
+        name: '第一工程組',
+        members: [
+          { id: 'm1', name: '張三' },
+          { id: 'm2', name: '李四' }
+        ]
+      },
+      {
+        id: 'g2',
+        name: '第二工程組',
+        members: [
+          { id: 'm3', name: '王五' }
+        ]
+      }
+    ],
     monthlyLeavesDb: {},
     savedTempWorkers: [],
     subcontractData: {},
@@ -297,8 +313,11 @@
 
   function switchTab(tabId) {
     ['dispatch', 'confirm', 'leave'].forEach(tab => {
-      document.getElementById('view_' + tabId).classList.remove('hidden');
-      if(tab !== tabId) document.getElementById('view_' + tab).classList.add('hidden');
+      const view = document.getElementById('view_' + tab);
+      if (view) {
+        if (tab === tabId) view.classList.remove('hidden');
+        else view.classList.add('hidden');
+      }
       
       const btn = document.getElementById('tabBtn_' + tab);
       if (btn) {
@@ -319,6 +338,11 @@
   function closeApiSettingModal() { closeModal('apiSettingModal'); }
   function openImportLeaveModal() { openModal('importLeaveModal'); }
   function closeImportLeaveModal() { closeModal('importLeaveModal'); }
+  function openCreateGroupModal() { alert('建立組別功能觸發'); }
+  function openAddSiteGlobalModal() { alert('新增案場功能觸發'); }
+  function generateLineMessage(type) { alert('生成 Line 派工訊息'); }
+  function exportNodeAsJpg(id, fileName) { alert('匯出圖片：' + fileName); }
+  function showShareUrlModal(type) { alert('分享連結：' + type); }
 
   // API 互動
   async function fetchAppData() {
@@ -400,8 +424,8 @@
     if (!AppState.dailyDispatchData[date]) {
       AppState.dailyDispatchData[date] = { isLocked: false, groups: {} };
     }
-    applyLockStateToUI(date);
     renderDispatchView(date);
+    applyLockStateToUI(date);
   }
 
   async function toggleDispatchLock() {
@@ -414,29 +438,34 @@
     const dayData = AppState.dailyDispatchData[date];
     dayData.isLocked = !dayData.isLocked;
 
-    await saveStateToCloud();
+    if (apiConfig.url) {
+      await saveStateToCloud();
+    }
     applyLockStateToUI(date);
     renderDispatchView(date);
   }
 
   function applyLockStateToUI(date) {
-    const dayData = AppState.dailyDispatchData[date] || { isLocked: false };
+    const dayData = (AppState.dailyDispatchData && AppState.dailyDispatchData[date]) || { isLocked: false };
     const isLocked = dayData.isLocked;
     const lockBtn = document.getElementById('lockDispatchBtn');
 
     if (isLocked) {
       lockBtn.innerText = '🔓 解除鎖定 (已鎖定)';
-      lockBtn.className = 'px-3 py-2 bg-slate-600 text-white rounded-xl text-xs font-bold shadow transition flex items-center';
+      lockBtn.className = 'px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-xl text-xs font-bold shadow transition flex items-center';
     } else {
       lockBtn.innerText = '🔒 鎖定當日排班';
       lockBtn.className = 'px-3 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold shadow transition flex items-center';
     }
 
-    // 鎖定排班介面的所有輸入控制項
+    // 鎖定排班介面的所有輸入與操作控制項
     document.querySelectorAll('.dispatch-control').forEach(ctrl => {
       ctrl.disabled = isLocked;
-      if (isLocked) ctrl.classList.add('opacity-50', 'bg-slate-100', 'cursor-not-allowed');
-      else ctrl.classList.remove('opacity-50', 'bg-slate-100', 'cursor-not-allowed');
+      if (isLocked) {
+        ctrl.classList.add('opacity-50', 'bg-slate-100', 'cursor-not-allowed');
+      } else {
+        ctrl.classList.remove('opacity-50', 'bg-slate-100', 'cursor-not-allowed');
+      }
     });
   }
 
@@ -482,7 +511,7 @@
     newGroup.members.push(memberData);
 
     closeTransferModal();
-    await saveStateToCloud();
+    if (apiConfig.url) await saveStateToCloud();
     alert(`${memberData.name} 已成功轉調至【${newGroup.name}】！`);
     renderDispatchView(document.getElementById('dispatchDate').value);
   }
@@ -574,14 +603,18 @@
 
     toggleLoading(true, '送出排休表...');
     try {
-      const res = await fetch(apiConfig.url, {
-        method: 'POST',
-        body: JSON.stringify({ action: 'submitLeave', memberName, yearMonth: currentYearMonth, leaves: leavesArray })
-      });
-      const result = await res.json();
-      if (result.status === 'ok') {
-        alert('排休表已成功儲存！');
-        await saveStateToCloud();
+      if (apiConfig.url) {
+        const res = await fetch(apiConfig.url, {
+          method: 'POST',
+          body: JSON.stringify({ action: 'submitLeave', memberName, yearMonth: currentYearMonth, leaves: leavesArray })
+        });
+        const result = await res.json();
+        if (result.status === 'ok') {
+          alert('排休表已成功儲存！');
+          await saveStateToCloud();
+        }
+      } else {
+        alert('已在本地暫存排休表！');
       }
     } catch (err) {
       alert('傳送失敗');
@@ -605,8 +638,44 @@
   }
 
   function renderDispatchView(date) {
-    // 渲染各組派工卡片與數據統計的掛載點
-    document.getElementById('totalMembers').innerText = `${(AppState.groupsData || []).reduce((acc, g) => acc + (g.members || []).length, 0)} 人`;
+    const dayData = (AppState.dailyDispatchData && AppState.dailyDispatchData[date]) || { isLocked: false };
+    const isLocked = dayData.isLocked;
+    const container = document.getElementById('groupsContainer');
+    container.innerHTML = '';
+
+    let totalMembers = 0;
+    (AppState.groupsData || []).forEach(group => {
+      totalMembers += (group.members || []).length;
+      
+      const card = document.createElement('div');
+      card.className = 'bg-white rounded-2xl p-4 shadow-sm border border-slate-200 space-y-3';
+      
+      let membersHtml = '';
+      (group.members || []).forEach(m => {
+        membersHtml += `
+          <div class="flex justify-between items-center bg-slate-50 p-2 rounded-xl border border-slate-100">
+            <span class="text-xs font-bold text-slate-700">${m.name}</span>
+            <div class="flex items-center space-x-1">
+              <button onclick="openTransferModal('${m.id}', '${m.name}', '${group.id}')" ${isLocked ? 'disabled' : ''} class="dispatch-control text-[11px] px-2 py-1 bg-white hover:bg-slate-100 text-slate-600 border rounded-lg font-bold">調組</button>
+            </div>
+          </div>
+        `;
+      });
+
+      card.innerHTML = `
+        <div class="flex justify-between items-center border-b pb-2">
+          <h3 class="font-bold text-sm text-slate-800 flex items-center">
+            <span class="w-2 h-2 rounded-full bg-blue-600 mr-2"></span>${group.name}
+          </h3>
+          <span class="text-xs text-slate-400 font-bold">${(group.members || []).length} 人</span>
+        </div>
+        <div class="space-y-1.5">${membersHtml || '<p class="text-xs text-slate-400">尚無人員</p>'}</div>
+      `;
+      container.appendChild(card);
+    });
+
+    document.getElementById('totalMembers').innerText = `${totalMembers} 人`;
+    lucide.createIcons();
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -617,6 +686,8 @@
     const now = new Date();
     document.getElementById('leaveYearSelect').value = now.getFullYear();
     document.getElementById('leaveMonthOnlySelect').value = String(now.getMonth() + 1).padStart(2, '0');
+    
+    updateUIWithData();
     onYearMonthChange();
 
     if (apiConfig.url) {
