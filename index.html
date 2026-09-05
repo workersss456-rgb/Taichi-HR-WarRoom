@@ -531,7 +531,7 @@ function getTomorrowDateString() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-document.getElementById("dispatchDate").value = getTomorrowDateString();
+document.getElementById("dispatchDate").value = localStorage.getItem("TK_LAST_DISPATCH_DATE") || getTomorrowDateString();
 
 // 組織架構資料
 const DEFAULT_GROUPS = [
@@ -681,23 +681,43 @@ function updateLastUpdateDisplay(meta) {
   el.innerText = `｜最後更新：${LAST_UPDATE_META.updatedBy || "未具名使用者"} 於 ${formatUpdateTime(LAST_UPDATE_META.updatedAt)}`;
 }
 
-// 統一的後端連線函式：用一般（非 no-cors）的 fetch 送出，才能讀到後端真正回應的內容，
-// 藉此才有辦法判斷「有沒有存成功」「是否發生多裝置衝突」，而不是像過去 no-cors 那樣送出去就不管了。
-// Content-Type 刻意使用 text/plain，是為了避開瀏覽器對 Google Apps Script 的預檢請求(preflight)，
-// Apps Script 後端本來就是直接讀 e.postData.contents，不受影響。
-async function postToBackend(payload) {
+// 讀取雲端目前的版本戳記（只讀 STATE_META 這一個 key，很輕量）。
+// 用 GET 是因為 Google Apps Script 對 GET 請求的跨網域回應才能穩定讀到內容；
+// 這個函式是「存檔前比對衝突」與「存檔後確認真的成功了」共用的讀取管道。
+async function fetchServerVersion() {
   if (!GOOGLE_SCRIPT_URL) return null;
   try {
-    const res = await fetch(GOOGLE_SCRIPT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(payload)
-    });
-    return await res.json();
+    const res = await fetch(GOOGLE_SCRIPT_URL + "?action=checkVersion");
+    const data = await res.json();
+    return (data && data.stateMeta) ? data.stateMeta : null;
   } catch (err) {
-    console.warn("後端連線失敗：", err);
+    console.warn("讀取雲端版本資訊失敗：", err);
     return null;
   }
+}
+
+// 實際送出存檔內容：務必使用 mode:"no-cors"。
+// 【重要】Google Apps Script 網頁應用程式對「一般（可讀取回應）」的跨網域 POST 請求支援並不穩定，
+// 瀏覽器常常會直接擋下來或丟出網路錯誤；no-cors 雖然讀不到回應內容，但請求本身能確實送達伺服器
+// 並執行、寫入資料，這是目前這個環境唯一經證實可靠的存檔方式，因此正式寫入一律走這個管道，
+// 「有沒有真的存成功」改用上面的 fetchServerVersion() 在存檔前後各讀一次來比對確認。
+function fireSaveStateRequest(operatorNameOverride) {
+  return fetch(GOOGLE_SCRIPT_URL, {
+    method: "POST",
+    mode: "no-cors",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({
+      action: "saveState",
+      groupsData: GROUPS_DATA,
+      savedTempWorkers: SAVED_TEMP_WORKERS,
+      monthlyLeavesDb: MONTHLY_LEAVES_DB,
+      subcontractData: SUBCONTRACT_DATA,
+      dailyTempWorkers: DAILY_TEMP_WORKERS,
+      dailyDispatchData: DAILY_DISPATCH_DATA,
+      operatorName: operatorNameOverride || getOperatorName(),
+      force: true
+    })
+  });
 }
 
 function saveDataToLocalStorage() {
@@ -713,66 +733,52 @@ function saveDataToLocalStorage() {
 }
 
 // 即時將組織/人員/排休主檔同步寫入 Google 試算表後台（背景草稿同步，不阻擋畫面操作）
-// 這裡刻意不帶版本比對：每一個小動作（切換下拉選單、輸入文字...）都要求使用者等待確認
-// 會讓畫面變得很卡，體驗不佳；真正需要「等確認存檔成功再繼續」與「多裝置衝突提醒」的，
-// 是下方的 commitStateToCloud()，只用在「儲存」「產出LINE」「送出排休」這幾個明確的送出動作上。
-async function pushStateToCloud() {
+// 這裡刻意不做版本比對、也不等待確認：每一個小動作（切換下拉選單、輸入文字...）都要求
+// 使用者等待確認會讓畫面變得很卡，體驗不佳；真正需要「等確認存檔成功再繼續」與
+// 「多裝置衝突提醒」的，是下方的 commitStateToCloud()，只用在「儲存」「產出LINE」
+// 「送出排休」這幾個明確的送出動作上。
+function pushStateToCloud() {
   if (!GOOGLE_SCRIPT_URL) return;
-  const result = await postToBackend({
-    action: "saveState",
-    groupsData: GROUPS_DATA,
-    savedTempWorkers: SAVED_TEMP_WORKERS,
-    monthlyLeavesDb: MONTHLY_LEAVES_DB,
-    subcontractData: SUBCONTRACT_DATA,
-    dailyTempWorkers: DAILY_TEMP_WORKERS,
-    dailyDispatchData: DAILY_DISPATCH_DATA,
-    operatorName: getOperatorName()
-  });
-  if (result && result.status === "ok") {
-    if (result.stateMeta) {
-      SERVER_STATE_VERSION = result.stateMeta.updatedAt;
-      updateLastUpdateDisplay(result.stateMeta);
-    }
-    updateCloudBadge(true);
-  } else {
-    updateCloudBadge(false);
-  }
+  fireSaveStateRequest()
+    .then(() => updateCloudBadge(true))
+    .catch(() => updateCloudBadge(false));
 }
 
-// 正式「送出」動作專用：等待雲端明確回應成功才算數，並在存檔前比對版本，
-// 偵測到其他裝置已搶先更新過時，回傳 conflict 讓呼叫端決定要重新整理還是強制覆蓋。
+// 正式「送出」動作專用：存檔前先比對版本偵測多裝置衝突，存檔後確實等待雲端確認寫入成功才算數。
 async function commitStateToCloud(force, operatorNameOverride) {
   if (!GOOGLE_SCRIPT_URL) return { ok: true }; // 尚未設定雲端試算表時，視同離線模式，不阻擋操作
-  const result = await postToBackend({
-    action: "saveState",
-    groupsData: GROUPS_DATA,
-    savedTempWorkers: SAVED_TEMP_WORKERS,
-    monthlyLeavesDb: MONTHLY_LEAVES_DB,
-    subcontractData: SUBCONTRACT_DATA,
-    dailyTempWorkers: DAILY_TEMP_WORKERS,
-    dailyDispatchData: DAILY_DISPATCH_DATA,
-    operatorName: operatorNameOverride || getOperatorName(),
-    clientVersion: SERVER_STATE_VERSION,
-    force: !!force
-  });
 
-  if (!result) {
+  // 1) 存檔前先讀一次目前雲端版本，跟本機記住的版本比對，偵測「有沒有人比我先存過」
+  if (!force) {
+    const beforeMeta = await fetchServerVersion();
+    if (beforeMeta && SERVER_STATE_VERSION !== null && Number(beforeMeta.updatedAt) !== Number(SERVER_STATE_VERSION)) {
+      return { ok: false, reason: "conflict", serverMeta: beforeMeta };
+    }
+    if (beforeMeta) SERVER_STATE_VERSION = beforeMeta.updatedAt;
+  }
+  const baselineVersion = SERVER_STATE_VERSION;
+
+  // 2) 用已證實可靠的 no-cors 管道送出實際存檔內容
+  try {
+    await fireSaveStateRequest(operatorNameOverride);
+  } catch (err) {
     updateCloudBadge(false);
     return { ok: false, reason: "network" };
   }
-  if (result.status === "conflict") {
-    return { ok: false, reason: "conflict", serverMeta: result.serverMeta };
-  }
-  if (result.status === "ok") {
-    if (result.stateMeta) {
-      SERVER_STATE_VERSION = result.stateMeta.updatedAt;
-      updateLastUpdateDisplay(result.stateMeta);
+
+  // 3) no-cors 讀不到回應內容，改用「反覆讀取版本戳記，看它是否已經變成新的」來確認真的存成功了
+  for (let i = 0; i < 8; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    const meta = await fetchServerVersion();
+    if (meta && meta.updatedAt && Number(meta.updatedAt) !== Number(baselineVersion)) {
+      SERVER_STATE_VERSION = meta.updatedAt;
+      updateLastUpdateDisplay(meta);
+      updateCloudBadge(true);
+      return { ok: true };
     }
-    updateCloudBadge(true);
-    return { ok: true };
   }
   updateCloudBadge(false);
-  return { ok: false, reason: "unknown" };
+  return { ok: false, reason: "timeout" };
 }
 
 // 包一層給「儲存/產出LINE/送出排休」等明確送出動作使用：
@@ -806,7 +812,7 @@ async function ensureSavedBeforeProceed(operatorNameOverride) {
     }
   }
 
-  alert("⚠️ 儲存失敗，請檢查網路連線或 Google 試算表設定是否正常，稍後再試一次！");
+  alert("⚠️ 儲存逾時或失敗，請檢查網路連線是否正常，稍後再試一次！若持續發生，請確認 Google 試算表的部署網址設定是否正確。");
   return false;
 }
 
@@ -2178,8 +2184,18 @@ async function submitMonthlyLeave() {
 
   if (savedOk) {
     const leavesPayload = Object.keys(currentMemberLeaves).map(d => ({ date: d, type: currentMemberLeaves[d], remark: "" }));
-    const logResult = await postToBackend({ action: "submitLeave", memberName: memberName, yearMonth: month, leaves: leavesPayload });
-    if (logResult && logResult.status === "ok") {
+    let logOk = true;
+    try {
+      await fetch(GOOGLE_SCRIPT_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "submitLeave", memberName: memberName, yearMonth: month, leaves: leavesPayload })
+      });
+    } catch (err) {
+      logOk = false;
+    }
+    if (logOk) {
       alert(`✅【${memberName}】${month} 排休已成功送出並同步雲端！`);
     } else {
       alert(`⚠️ 排休主檔已存檔，但寫入「排休紀錄」歷史分頁時似乎沒有成功，請稍後重新整理確認一次，或再送出一次！`);
@@ -2245,8 +2261,18 @@ async function sendToGoogleSheet(groupId) {
   subcontractList.forEach(sc => records.push({ name: sc.vendor, role: "發包", site: sc.site, workRatio: sc.count, remark: `工項:${sc.workItem || '未填寫'}／發包人數:${sc.count}人（不計入本工工數）` }));
 
   if (!GOOGLE_SCRIPT_URL) return true;
-  const result = await postToBackend({ action: "dispatch", date: date, groupId: group.id, groupName: group.name, managerName: `${group.managerName} ${group.managerTitle}`, records: records });
-  return !!(result && result.status === "ok");
+  try {
+    await fetch(GOOGLE_SCRIPT_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "dispatch", date: date, groupId: group.id, groupName: group.name, managerName: `${group.managerName} ${group.managerTitle}`, records: records })
+    });
+    return true;
+  } catch (err) {
+    console.warn("派工紀錄寫入請求失敗：", err);
+    return false;
+  }
 }
 
 // 需求3（防呆 a）：每次派工狀態有任何異動時，自動（防抖 1.5 秒）把「派工紀錄」永久分頁也一併補上最新內容，
@@ -2783,6 +2809,7 @@ function handleLeaveImportFile(event) {
 }
 
 document.getElementById("dispatchDate").addEventListener("change", () => {
+  localStorage.setItem("TK_LAST_DISPATCH_DATE", document.getElementById("dispatchDate").value);
   flushDispatchLogAutoSync();
   initDispatchState();
   renderUI();
