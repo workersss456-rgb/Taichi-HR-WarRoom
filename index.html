@@ -386,6 +386,30 @@
   </div>
 </div>
 
+<!-- 調動組員至其他組別 Modal 彈窗 -->
+<div id="changeGroupModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+  <div class="bg-white w-full max-w-sm rounded-2xl shadow-2xl p-5 space-y-4">
+    <div class="flex justify-between items-center border-b pb-2">
+      <h3 class="font-bold text-slate-800 text-base flex items-center">
+        <i data-lucide="repeat" class="w-4 h-4 text-blue-600 mr-1.5"></i> 調動組員至其他組別
+      </h3>
+      <button onclick="closeChangeGroupModal()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-4 h-4"></i></button>
+    </div>
+    <div class="space-y-3">
+      <p class="text-xs text-slate-500 leading-relaxed">
+        將 <span id="changeGroupMemberNameLabel" class="font-bold text-slate-800"></span>
+        從 <span id="changeGroupFromLabel" class="font-bold text-slate-800"></span> 調動至：
+      </p>
+      <select id="changeGroupTargetSelect" class="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white focus:outline-none"></select>
+      <p class="text-[11px] text-slate-400 leading-relaxed">調動後，該同仁今日／未來已排定的出勤狀態會盡量保留，但派駐案場需要改成新組別可選的案場清單（歷史派工紀錄與排休紀錄不受影響）。</p>
+    </div>
+    <div class="flex justify-end space-x-2 pt-2">
+      <button onclick="closeChangeGroupModal()" class="px-3 py-1.5 border border-slate-300 text-slate-600 text-xs rounded-lg font-medium">取消</button>
+      <button onclick="confirmChangeMemberGroup()" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow">確認調動</button>
+    </div>
+  </div>
+</div>
+
 <!-- iOS 相容專用：連結分享彈窗 -->
 <div id="shareUrlModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
   <div class="bg-white w-full max-w-md rounded-2xl shadow-2xl p-5 space-y-4">
@@ -628,6 +652,30 @@ let DAILY_DISPATCH_DATA = JSON.parse(localStorage.getItem("TK_DAILY_DISPATCH_DAT
 let activeLeaveTypeBrush = "";
 let activeAddingSiteGroupId = null;
 let activeManagingGroupId = null;
+let activeChangeGroupMember = null;
+
+// ===== 待送出清單（dirty tracking） =====
+// 後端現在把「每日派工/每日點工/發包人數」改成一天一列儲存，「每月排休」改成一個月一列。
+// 既然雲端可能已經保留長達一年的歷史資料，如果前端還是像以前一樣「每次隨便一個小動作
+// 都把記憶體裡全部日期的資料整包送出去」，一年份資料每次點擊都要整包傳輸+後端整批寫入，
+// 畫面會變得很卡。所以改成只記錄「這次到底改了哪幾天/哪幾個月」，存檔時只送出這些，
+// 其他早就同步過、沒異動的日期完全不會再重複傳送。
+let dirtyDispatchDates = new Set();
+let dirtyTempWorkerDates = new Set();
+let dirtySubcontractDates = new Set();
+let dirtyLeaveMonths = new Set();
+
+// 「儲存」「產出LINE派工文字」這種有確認機制、允許失敗重試的正式送出動作專用：
+// 不管背景自動同步剛好有沒有搶先把待送出清單清空過，這裡都重新把「目前畫面所在的派工日期」
+// 標記回待送出清單，確保接下來呼叫 ensureSavedBeforeProceed() 時，這一天的資料一定會被
+// 包進這次的正式送出內容裡，不會因為背景同步的樂觀清空機制而漏送。
+function markCurrentDateDirtyForCommit_() {
+  const currentDate = document.getElementById("dispatchDate") ? document.getElementById("dispatchDate").value : null;
+  if (!currentDate) return;
+  dirtyDispatchDates.add(currentDate);
+  dirtyTempWorkerDates.add(currentDate);
+  dirtySubcontractDates.add(currentDate);
+}
 
 // ===== 假別顏色統一定義（員工月曆排休 與 主管每日派工 都呼叫這裡，確保顏色永遠一致） =====
 const LEAVE_TYPE_COLOR_MAP = {
@@ -701,7 +749,31 @@ async function fetchServerVersion() {
 // 瀏覽器常常會直接擋下來或丟出網路錯誤；no-cors 雖然讀不到回應內容，但請求本身能確實送達伺服器
 // 並執行、寫入資料，這是目前這個環境唯一經證實可靠的存檔方式，因此正式寫入一律走這個管道，
 // 「有沒有真的存成功」改用上面的 fetchServerVersion() 在存檔前後各讀一次來比對確認。
+// 從「完整物件」裡，只挑出待送出清單(dirtySet)裡有標記到的那幾個 key，組成一個小包裹。
+// 沒被標記到的日期/月份完全不會出現在這次要送出的內容裡——後端現在是「一天/一個月一列」
+// 各自存放，沒送到的就是完全不動它，所以只送有異動的部分是安全、正確的做法。
+function buildDirtyPayload_(fullObj, dirtySet) {
+  const result = {};
+  dirtySet.forEach(key => {
+    if (fullObj[key] !== undefined) result[key] = fullObj[key];
+  });
+  return result;
+}
+
 function fireSaveStateRequest(operatorNameOverride) {
+  const dispatchPayload = buildDirtyPayload_(DAILY_DISPATCH_DATA, dirtyDispatchDates);
+  const tempWorkerPayload = buildDirtyPayload_(DAILY_TEMP_WORKERS, dirtyTempWorkerDates);
+  const subcontractPayload = buildDirtyPayload_(SUBCONTRACT_DATA, dirtySubcontractDates);
+  const leavePayload = buildDirtyPayload_(MONTHLY_LEAVES_DB, dirtyLeaveMonths);
+
+  // 送出後立刻清空待送出清單（樂觀作法）：背景自動同步本來就是 best-effort，
+  // 如果剛好這次送出失敗，只要使用者之後對同一天/同一月再做任何一個小動作，
+  // 就會重新被標記回待送出清單，下一次存檔還是會補上，不會就此永遠漏掉。
+  dirtyDispatchDates = new Set();
+  dirtyTempWorkerDates = new Set();
+  dirtySubcontractDates = new Set();
+  dirtyLeaveMonths = new Set();
+
   return fetch(GOOGLE_SCRIPT_URL, {
     method: "POST",
     mode: "no-cors",
@@ -710,10 +782,10 @@ function fireSaveStateRequest(operatorNameOverride) {
       action: "saveState",
       groupsData: GROUPS_DATA,
       savedTempWorkers: SAVED_TEMP_WORKERS,
-      monthlyLeavesDb: MONTHLY_LEAVES_DB,
-      subcontractData: SUBCONTRACT_DATA,
-      dailyTempWorkers: DAILY_TEMP_WORKERS,
-      dailyDispatchData: DAILY_DISPATCH_DATA,
+      monthlyLeavesDb: leavePayload,
+      subcontractData: subcontractPayload,
+      dailyTempWorkers: tempWorkerPayload,
+      dailyDispatchData: dispatchPayload,
       operatorName: operatorNameOverride || getOperatorName(),
       force: true
     })
@@ -722,6 +794,16 @@ function fireSaveStateRequest(operatorNameOverride) {
 
 function saveDataToLocalStorage() {
   if (cloudSyncInFlight) localEditedDuringSync = true;
+
+  // 系統裡幾乎所有操作都是針對「目前畫面選取的派工日期」，所以預設一律把這一天標記為待送出；
+  // 少數會跨越多天的操作（例如組員調動組別），會在各自的函式裡另外把相關日期也標記進去。
+  const currentDate = document.getElementById("dispatchDate") ? document.getElementById("dispatchDate").value : null;
+  if (currentDate) {
+    dirtyDispatchDates.add(currentDate);
+    dirtyTempWorkerDates.add(currentDate);
+    dirtySubcontractDates.add(currentDate);
+  }
+
   localStorage.setItem("TK_GROUPS_DATA_PROD", JSON.stringify(GROUPS_DATA));
   localStorage.setItem("TK_SAVED_TEMP_WORKERS_PROD", JSON.stringify(SAVED_TEMP_WORKERS));
   localStorage.setItem("TK_MONTHLY_LEAVES_DB", JSON.stringify(MONTHLY_LEAVES_DB));
@@ -1132,7 +1214,7 @@ function renderConfirmView() {
 // 每天的派工/點工/發包資料如果永遠不清，JSON 會一直長大，最後可能撐爆 Google 試算表單一
 // 儲存格的容量上限而整個存檔失敗。這裡只保留「最近 90 天內」的資料在這份即時同步的 JSON 裡；
 // 更久以前的資料，正式的歷史紀錄已經另外存在「派工紀錄」「排休紀錄」分頁裡，不會因此遺失。
-const DAILY_DATA_RETENTION_DAYS = 90;
+const DAILY_DATA_RETENTION_DAYS = 365;
 function pruneOldDailyData() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - DAILY_DATA_RETENTION_DAYS);
@@ -1164,7 +1246,7 @@ function initDispatchState() {
 
   GROUPS_DATA.forEach(group => {
     if (!dayData[group.id]) {
-      dayData[group.id] = { managerStatus: null, memberStatus: {} };
+      dayData[group.id] = { managerStatus: null, memberStatus: {}, locked: false };
     }
     const saved = dayData[group.id];
 
@@ -1417,6 +1499,9 @@ function renderUI() {
                 </select>
               </div>
             `}
+            <button onclick="openChangeGroupModal('${group.id}', '${member}')" class="text-slate-300 hover:text-blue-500 transition p-1" title="調動至其他組別">
+              <i data-lucide="repeat" class="w-3.5 h-3.5"></i>
+            </button>
             <button onclick="removeMember('${group.id}', ${mIdx})" class="text-slate-300 hover:text-red-500 transition p-1" title="移除成員">
               <i data-lucide="x" class="w-3.5 h-3.5"></i>
             </button>
@@ -1481,20 +1566,26 @@ function renderUI() {
       subcontractHTML = `<p class="text-xs text-slate-400 italic py-0.5">今日尚無發包人員</p>`;
     }
 
+    const isLocked = !!state.locked;
+
     card.innerHTML = `
       <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 flex flex-wrap justify-between items-center gap-2">
         <div class="flex items-center space-x-2">
           <span class="font-black text-slate-900 text-base">${group.name}</span>
           <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-md font-bold">${group.managerName} ${group.managerTitle}</span>
           ${subcontractTotal > 0 ? `<span class="text-xs bg-cyan-100 text-cyan-700 px-2 py-0.5 rounded-md font-bold">🔧 發包 ${subcontractTotal}人</span>` : ''}
+          ${isLocked ? `<span class="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-md font-black flex items-center"><i data-lucide="lock" class="w-3 h-3 mr-1"></i>今日已鎖定</span>` : ''}
         </div>
         
         <div class="flex items-center space-x-1.5">
-          <button onclick="openManageSitesModal('${group.id}')" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-lg font-bold transition flex items-center" title="管理/刪除本組負責的案場">
+          <button onclick="toggleGroupLock('${group.id}')" class="text-xs ${isLocked ? 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'} px-2 py-1 rounded-lg font-bold transition flex items-center" title="${isLocked ? '解除本組今日鎖定' : '鎖定本組今日排班，避免誤改'}">
+            <i data-lucide="${isLocked ? 'lock-open' : 'lock'}" class="w-3 h-3 mr-1"></i> ${isLocked ? '解鎖' : '鎖定本日'}
+          </button>
+          <button onclick="openManageSitesModal('${group.id}')" class="text-xs ${isLocked ? 'bg-slate-100 text-slate-400 cursor-not-allowed' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'} px-2 py-1 rounded-lg font-bold transition flex items-center" title="管理/刪除本組負責的案場">
             <i data-lucide="map-pin" class="w-3 h-3 mr-1 text-slate-500"></i> 案場(${group.sites.length})
           </button>
           <span class="text-xs text-slate-400 font-medium">${group.members.length + 1}人</span>
-          <button onclick="deleteGroup('${group.id}')" class="text-slate-300 hover:text-red-500 p-1 transition" title="解散/刪除此組別">
+          <button onclick="deleteGroup('${group.id}')" class="${isLocked ? 'text-slate-200 cursor-not-allowed' : 'text-slate-300 hover:text-red-500'} p-1 transition" title="解散/刪除此組別">
             <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
           </button>
         </div>
@@ -1502,51 +1593,58 @@ function renderUI() {
 
       <div class="p-3 sm:p-4 flex-1 flex flex-col justify-between">
         <div>
-          <div class="space-y-0.5">${managerHTML}${membersHTML}${borrowedInHTML}</div>
-
-          <div class="flex items-center space-x-2 mt-2 pt-2 border-t border-slate-100">
-            <input type="text" id="newMemberInput_${group.id}" placeholder="➕ 手動新增組員..." class="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 flex-1 focus:outline-none focus:border-blue-400">
-            <button onclick="addNewMember('${group.id}')" class="bg-slate-800 hover:bg-slate-700 text-white text-xs px-2.5 py-1.5 rounded-lg font-medium transition">
-              加入名冊
-            </button>
-          </div>
-
-          <div class="mt-3.5 pt-2.5 border-t border-dashed border-slate-200">
-            <span class="text-xs font-bold text-slate-700 flex items-center mb-1.5">
-              <i data-lucide="user-plus" class="w-3.5 h-3.5 text-purple-600 mr-1"></i> 外部點工指派
-            </span>
-            ${tempWorkersHTML}
-            <div class="flex flex-wrap gap-1.5 mt-1.5">
-              <input list="savedTempWorkersList" id="twName_${group.id}" placeholder="點工姓名" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[110px] focus:outline-none">
-              <datalist id="savedTempWorkersList">${SAVED_TEMP_WORKERS.map(tw => `<option value="${tw}">`).join('')}</datalist>
-
-              <select id="twSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
-                ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
-              </select>
-
-              <select id="twRatio_${group.id}" class="text-xs border border-slate-300 rounded-lg px-1.5 py-1.5 bg-white text-slate-700">
-                <option value="1.0">1.0工</option>
-                <option value="0.5">0.5工</option>
-                <option value="1.5">1.5工</option>
-              </select>
-              <button onclick="addTempWorker('${group.id}')" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
+          ${isLocked ? `
+            <div class="bg-red-50 border border-red-200 text-red-700 text-xs font-bold rounded-lg px-3 py-2 mb-2.5 flex items-center">
+              <i data-lucide="lock" class="w-3.5 h-3.5 mr-1.5 flex-shrink-0"></i> 本組今日排班已鎖定，如需修改請點擊右上角「解鎖」
             </div>
-          </div>
+          ` : ''}
+          <div class="${isLocked ? 'opacity-50 pointer-events-none select-none' : ''}">
+            <div class="space-y-0.5">${managerHTML}${membersHTML}${borrowedInHTML}</div>
 
-          <div class="mt-3.5 pt-2.5 border-t border-dashed border-slate-200">
-            <span class="text-xs font-bold text-slate-700 flex items-center mb-1.5">
-              <i data-lucide="hard-hat" class="w-3.5 h-3.5 text-cyan-600 mr-1"></i> 發包人數登記
-              ${subcontractTotal > 0 ? `<span class="ml-1.5 text-[11px] bg-cyan-50 text-cyan-700 px-1.5 py-0.5 rounded-full font-black">共 ${subcontractTotal} 人</span>` : ''}
-            </span>
-            ${subcontractHTML}
-            <div class="flex flex-wrap gap-1.5 mt-1.5">
-              <input type="text" id="scVendor_${group.id}" placeholder="發包廠商名稱" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
-              <input type="text" id="scItem_${group.id}" placeholder="工項(手動輸入)" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
-              <select id="scSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
-                ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
-              </select>
-              <input type="number" id="scCount_${group.id}" min="1" value="1" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-16 text-center">
-              <button onclick="addSubcontractEntry('${group.id}')" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
+            <div class="flex items-center space-x-2 mt-2 pt-2 border-t border-slate-100">
+              <input type="text" id="newMemberInput_${group.id}" placeholder="➕ 手動新增組員..." class="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 flex-1 focus:outline-none focus:border-blue-400">
+              <button onclick="addNewMember('${group.id}')" class="bg-slate-800 hover:bg-slate-700 text-white text-xs px-2.5 py-1.5 rounded-lg font-medium transition">
+                加入名冊
+              </button>
+            </div>
+
+            <div class="mt-3.5 pt-2.5 border-t border-dashed border-slate-200">
+              <span class="text-xs font-bold text-slate-700 flex items-center mb-1.5">
+                <i data-lucide="user-plus" class="w-3.5 h-3.5 text-purple-600 mr-1"></i> 外部點工指派
+              </span>
+              ${tempWorkersHTML}
+              <div class="flex flex-wrap gap-1.5 mt-1.5">
+                <input list="savedTempWorkersList" id="twName_${group.id}" placeholder="點工姓名" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[110px] focus:outline-none">
+                <datalist id="savedTempWorkersList">${SAVED_TEMP_WORKERS.map(tw => `<option value="${tw}">`).join('')}</datalist>
+
+                <select id="twSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
+                  ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
+                </select>
+
+                <select id="twRatio_${group.id}" class="text-xs border border-slate-300 rounded-lg px-1.5 py-1.5 bg-white text-slate-700">
+                  <option value="1.0">1.0工</option>
+                  <option value="0.5">0.5工</option>
+                  <option value="1.5">1.5工</option>
+                </select>
+                <button onclick="addTempWorker('${group.id}')" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
+              </div>
+            </div>
+
+            <div class="mt-3.5 pt-2.5 border-t border-dashed border-slate-200">
+              <span class="text-xs font-bold text-slate-700 flex items-center mb-1.5">
+                <i data-lucide="hard-hat" class="w-3.5 h-3.5 text-cyan-600 mr-1"></i> 發包人數登記
+                ${subcontractTotal > 0 ? `<span class="ml-1.5 text-[11px] bg-cyan-50 text-cyan-700 px-1.5 py-0.5 rounded-full font-black">共 ${subcontractTotal} 人</span>` : ''}
+              </span>
+              ${subcontractHTML}
+              <div class="flex flex-wrap gap-1.5 mt-1.5">
+                <input type="text" id="scVendor_${group.id}" placeholder="發包廠商名稱" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
+                <input type="text" id="scItem_${group.id}" placeholder="工項(手動輸入)" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 flex-1 min-w-[100px] focus:outline-none">
+                <select id="scSite_${group.id}" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-blue-700 font-medium">
+                  ${group.sites.map(s => `<option value="${s}">${s}</option>`).join('')}
+                </select>
+                <input type="number" id="scCount_${group.id}" min="1" value="1" class="text-xs border border-slate-300 rounded-lg px-2 py-1.5 w-16 text-center">
+                <button onclick="addSubcontractEntry('${group.id}')" class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs px-2.5 py-1.5 rounded-lg font-semibold transition">+ 加入</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1572,6 +1670,46 @@ function renderUI() {
   calculateStats();
 }
 
+// ===== 每組每日排班鎖定（各組獨立） =====
+function isGroupLockedForDate(groupId, date) {
+  const dayData = DAILY_DISPATCH_DATA[date];
+  return !!(dayData && dayData[groupId] && dayData[groupId].locked);
+}
+
+// 統一的鎖定防呆檢查：鎖定中回傳 true 並跳出提醒，未鎖定回傳 false 讓呼叫端繼續往下執行
+function checkGroupLockOrAlert(groupId) {
+  const date = document.getElementById("dispatchDate").value;
+  const group = GROUPS_DATA.find(g => g.id === groupId);
+  if (isGroupLockedForDate(groupId, date)) {
+    alert(`🔒【${group ? group.name : ''}】${date} 的排班已鎖定，如需修改請先點擊「解鎖」！`);
+    return true;
+  }
+  return false;
+}
+
+function toggleGroupLock(groupId) {
+  const date = document.getElementById("dispatchDate").value;
+  if (!DAILY_DISPATCH_DATA[date]) DAILY_DISPATCH_DATA[date] = {};
+  if (!DAILY_DISPATCH_DATA[date][groupId]) DAILY_DISPATCH_DATA[date][groupId] = { managerStatus: null, memberStatus: {}, locked: false };
+  const dayGroupData = DAILY_DISPATCH_DATA[date][groupId];
+  const group = GROUPS_DATA.find(g => g.id === groupId);
+  const groupName = group ? group.name : '';
+
+  if (dayGroupData.locked) {
+    if (confirm(`確定要解除【${groupName}】${date} 的排班鎖定嗎？解除後即可再次編輯這組今天的派工資料。`)) {
+      dayGroupData.locked = false;
+      saveDataToLocalStorage();
+      renderUI();
+    }
+  } else {
+    if (confirm(`確定要鎖定【${groupName}】${date} 的排班嗎？\n\n鎖定後這組今天的出勤狀態、案場指派、點工、發包等都無法再編輯，直到解鎖為止（其他組別不受影響）。`)) {
+      dayGroupData.locked = true;
+      saveDataToLocalStorage();
+      renderUI();
+    }
+  }
+}
+
 function statusToWorkRatio(status) {
   if (status === 'work') return 1.0;
   if (status === 'half') return 0.5;
@@ -1582,6 +1720,7 @@ function statusToWorkRatio(status) {
 }
 
 function updateMemberStatus(groupId, member, status) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   const m = currentDispatch[groupId].memberStatus[member];
   if (m.leaveType && (status === 'work' || status === 'half' || status === 'borrow' || status === 'ot1' || status === 'ot15')) {
     if (!confirm(`⚠️【排假防呆提醒】\n${member} 今日原已排定【${m.leaveType}】！\n是否確認已完成溝通並改為調班出勤？`)) {
@@ -1601,6 +1740,7 @@ function updateMemberStatus(groupId, member, status) {
   renderUI();
 }
 function updateManagerStatus(groupId, status) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   const m = currentDispatch[groupId].managerStatus;
   if (m.leaveType && (status === 'work' || status === 'half' || status === 'borrow' || status === 'ot1' || status === 'ot15')) {
     if (!confirm(`⚠️【排假防呆提醒】\n主管 ${m.name} 今日原已排定【${m.leaveType}】！\n是否確認調班出勤？`)) {
@@ -1621,6 +1761,7 @@ function updateManagerStatus(groupId, status) {
 }
 
 function updateManagerSite(groupId, newSite) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   if (newSite === "__ADD_NEW__") {
     openAddSiteForGroup(groupId);
   } else {
@@ -1631,6 +1772,7 @@ function updateManagerSite(groupId, newSite) {
 }
 
 function updateMemberSite(groupId, member, newSite) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   if (newSite === "__ADD_NEW__") {
     openAddSiteForGroup(groupId);
   } else {
@@ -1641,6 +1783,7 @@ function updateMemberSite(groupId, member, newSite) {
 }
 
 function updateManagerBorrowTarget(groupId, targetGroupId) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   const m = currentDispatch[groupId].managerStatus;
   m.targetGroupId = targetGroupId;
   const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
@@ -1651,6 +1794,7 @@ function updateManagerBorrowTarget(groupId, targetGroupId) {
   renderUI();
 }
 function updateBorrowTargetGroup(groupId, member, targetGroupId) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
   const m = currentDispatch[groupId].memberStatus[member];
   m.targetGroupId = targetGroupId;
   const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
@@ -1660,10 +1804,18 @@ function updateBorrowTargetGroup(groupId, member, targetGroupId) {
   saveDataToLocalStorage();
   renderUI();
 }
-function updateManagerBorrowSite(groupId, site) { currentDispatch[groupId].managerStatus.assignedSite = site; saveDataToLocalStorage(); renderUI(); }
-function updateMemberBorrowSite(groupId, member, site) { currentDispatch[groupId].memberStatus[member].assignedSite = site; saveDataToLocalStorage(); renderUI(); }
+function updateManagerBorrowSite(groupId, site) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
+  currentDispatch[groupId].managerStatus.assignedSite = site; saveDataToLocalStorage(); renderUI();
+}
+function updateMemberBorrowSite(groupId, member, site) {
+  if (checkGroupLockOrAlert(groupId)) { renderUI(); return; }
+  currentDispatch[groupId].memberStatus[member].assignedSite = site; saveDataToLocalStorage(); renderUI();
+}
 // 從「借入人員」那一側修改案場時，直接寫回原組別自己的紀錄，兩邊看到的、存檔的都是同一份資料
+// 鎖定檢查要看「原組別」（sourceGroupId）是否鎖定，因為實際被修改的資料屬於原組別
 function updateBorrowedInMemberSite(sourceGroupId, isManager, memberKey, site) {
+  if (checkGroupLockOrAlert(sourceGroupId)) { renderUI(); return; }
   const sourceState = currentDispatch[sourceGroupId];
   if (!sourceState) return;
   if (isManager === true || isManager === 'true') {
@@ -1684,6 +1836,7 @@ function getTempWorkerList(groupId) {
 }
 
 function addTempWorker(groupId) {
+  if (checkGroupLockOrAlert(groupId)) return;
   const name = document.getElementById(`twName_${groupId}`).value.trim();
   const site = document.getElementById(`twSite_${groupId}`).value;
   const ratio = parseFloat(document.getElementById(`twRatio_${groupId}`).value);
@@ -1696,6 +1849,7 @@ function addTempWorker(groupId) {
   renderUI();
 }
 function removeTempWorker(groupId, idx) {
+  if (checkGroupLockOrAlert(groupId)) return;
   getTempWorkerList(groupId).splice(idx, 1);
   saveDataToLocalStorage();
   renderUI();
@@ -1710,6 +1864,7 @@ function getSubcontractList(groupId) {
 }
 
 function addSubcontractEntry(groupId) {
+  if (checkGroupLockOrAlert(groupId)) return;
   const vendor = document.getElementById(`scVendor_${groupId}`).value.trim();
   const workItem = document.getElementById(`scItem_${groupId}`).value.trim();
   const site = document.getElementById(`scSite_${groupId}`).value;
@@ -1727,6 +1882,7 @@ function addSubcontractEntry(groupId) {
 }
 
 function removeSubcontractEntry(groupId, idx) {
+  if (checkGroupLockOrAlert(groupId)) return;
   getSubcontractList(groupId).splice(idx, 1);
   saveDataToLocalStorage();
   renderUI();
@@ -1770,6 +1926,7 @@ function calculateStats() {
 
 // 各組案場管理與刪除邏輯
 function openManageSitesModal(groupId) {
+  if (checkGroupLockOrAlert(groupId)) return;
   activeManagingGroupId = groupId;
   const group = GROUPS_DATA.find(g => g.id === groupId);
   if (!group) return;
@@ -1929,6 +2086,7 @@ function confirmCreateGroup() {
 }
 
 function deleteGroup(groupId) {
+  if (checkGroupLockOrAlert(groupId)) return;
   const group = GROUPS_DATA.find(g => g.id === groupId);
   if (!group) return;
 
@@ -1972,6 +2130,7 @@ function confirmAddNewMember() {
   const groupId = document.getElementById("newMemberGroupSelect").value;
 
   if (!name) return alert("請輸入同仁姓名！");
+  if (checkGroupLockOrAlert(groupId)) return;
 
   const group = GROUPS_DATA.find(g => g.id === groupId);
   if (!group) return;
@@ -1994,6 +2153,7 @@ function confirmAddNewMember() {
 }
 
 function addNewMember(groupId) {
+  if (checkGroupLockOrAlert(groupId)) return;
   const input = document.getElementById(`newMemberInput_${groupId}`);
   const newName = input.value.trim();
   if (!newName) return alert("請輸入組員姓名！");
@@ -2018,6 +2178,7 @@ function addNewMember(groupId) {
 }
 
 function removeMember(groupId, index) {
+  if (checkGroupLockOrAlert(groupId)) return;
   const group = GROUPS_DATA.find(g => g.id === groupId);
   const memberName = group.members[index];
   if (confirm(`確定要將【${memberName}】從 ${group.name} 移除嗎？`)) {
@@ -2055,6 +2216,100 @@ function deleteCurrentSelectedMember() {
   initDispatchState();
   renderUI();
   alert(`🗑️ 已將【${memberName}】從系統移除！`);
+}
+
+// ===== 組員調動至其他組別（保留原本出勤狀態，只更換所屬組別與可選案場清單） =====
+function getTodayDateString() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function openChangeGroupModal(groupId, memberName) {
+  if (checkGroupLockOrAlert(groupId)) return;
+  const fromGroup = GROUPS_DATA.find(g => g.id === groupId);
+  if (!fromGroup) return;
+
+  if (GROUPS_DATA.length <= 1) {
+    return alert("目前系統只有一個組別，沒有其他組別可以調動！");
+  }
+
+  activeChangeGroupMember = { fromGroupId: groupId, memberName };
+
+  document.getElementById("changeGroupMemberNameLabel").innerText = memberName;
+  document.getElementById("changeGroupFromLabel").innerText = fromGroup.name;
+
+  const select = document.getElementById("changeGroupTargetSelect");
+  select.innerHTML = "";
+  GROUPS_DATA.filter(g => g.id !== groupId).forEach(g => {
+    select.innerHTML += `<option value="${g.id}">${g.name}（${g.managerName} ${g.managerTitle}）</option>`;
+  });
+
+  document.getElementById("changeGroupModal").classList.remove("hidden");
+  lucide.createIcons();
+}
+
+function closeChangeGroupModal() {
+  document.getElementById("changeGroupModal").classList.add("hidden");
+  activeChangeGroupMember = null;
+}
+
+function confirmChangeMemberGroup() {
+  if (!activeChangeGroupMember) return;
+  const { fromGroupId, memberName } = activeChangeGroupMember;
+  const targetGroupId = document.getElementById("changeGroupTargetSelect").value;
+  if (!targetGroupId) return alert("請選擇要調動至的組別！");
+
+  const fromGroup = GROUPS_DATA.find(g => g.id === fromGroupId);
+  const targetGroup = GROUPS_DATA.find(g => g.id === targetGroupId);
+  if (!fromGroup || !targetGroup) return;
+
+  if (targetGroup.members.includes(memberName) || targetGroup.managerName === memberName) {
+    return alert(`【${targetGroup.name}】已經有同名同仁，請確認姓名是否重複！`);
+  }
+
+  if (!confirm(`確定要將【${memberName}】從【${fromGroup.name}】調動至【${targetGroup.name}】嗎？\n\n今日／未來已排定的出勤狀態會盡量保留，但派駐案場會改成新組別可選的案場清單。`)) {
+    return;
+  }
+
+  // 1) 名冊異動：從原組別移除，加入新組別（歷史的「派工紀錄」「排休紀錄」分頁以姓名/組名記錄，不受影響）
+  const idx = fromGroup.members.indexOf(memberName);
+  if (idx !== -1) fromGroup.members.splice(idx, 1);
+  if (!targetGroup.members.includes(memberName)) targetGroup.members.push(memberName);
+
+  // 2) 只搬動「今天以後」的每日派工資料，過去的歷史快照維持原樣不追溯更動；
+  //    盡量保留原本出勤狀態，只有派往案場若剛好不在新組別的案場清單裡，才會改成新組別第一個案場
+  const todayStr = getTodayDateString();
+  Object.keys(DAILY_DISPATCH_DATA).forEach(dateKey => {
+    if (dateKey < todayStr) return;
+    const dayData = DAILY_DISPATCH_DATA[dateKey];
+    const oldGroupDay = dayData[fromGroupId];
+    if (!oldGroupDay || !oldGroupDay.memberStatus || !oldGroupDay.memberStatus[memberName]) return;
+
+    const movedStatus = oldGroupDay.memberStatus[memberName];
+    delete oldGroupDay.memberStatus[memberName];
+
+    if (!dayData[targetGroupId]) dayData[targetGroupId] = { managerStatus: null, memberStatus: {}, locked: false };
+    const targetGroupDay = dayData[targetGroupId];
+
+    if (movedStatus.status !== 'borrow' && movedStatus.status !== 'off' && !targetGroup.sites.includes(movedStatus.assignedSite)) {
+      movedStatus.assignedSite = targetGroup.sites[0] || "未指定案場";
+    }
+    targetGroupDay.memberStatus[memberName] = movedStatus;
+
+    // 這個操作可能一次橫跨很多個「今天以後」的日期，不是只有目前畫面選取的那一天，
+    // 所以每搬動一天，就要把那一天也標記進待送出清單，存檔時才不會漏掉其他天的異動。
+    dirtyDispatchDates.add(dateKey);
+  });
+
+  saveDataToLocalStorage();
+  closeChangeGroupModal();
+  initLeaveMemberSelect();
+  initDispatchState();
+  renderUI();
+  alert(`✅ 已將【${memberName}】從【${fromGroup.name}】調動至【${targetGroup.name}】！`);
 }
 
 // 員工月曆排休專區邏輯
@@ -2176,10 +2431,15 @@ async function submitMonthlyLeave() {
 
   if (!MONTHLY_LEAVES_DB[month]) MONTHLY_LEAVES_DB[month] = {};
   MONTHLY_LEAVES_DB[month][memberName] = currentMemberLeaves;
+  dirtyLeaveMonths.add(month);
   saveDataToLocalStorage();
 
   // 需求3：確認雲端明確存好（含多裝置衝突偵測，例如兩位同仁同時送出排休）才提示成功。
   // 這裡把操作人員名稱帶成員工自己選取的姓名，方便主管在「最後更新」看到是哪位同仁剛送出。
+  // 這裡再標記一次待送出月份：因為上面 saveDataToLocalStorage() 已經觸發過一次背景同步、
+  // 可能已經把待送出清單清空了，重新標記才能保證接下來這個「有確認機制」的正式送出，
+  // 一定會包含這個月的排休資料，不會因為背景同步搶先清空而漏送。
+  dirtyLeaveMonths.add(month);
   const savedOk = await ensureSavedBeforeProceed(memberName);
 
   if (savedOk) {
@@ -2302,6 +2562,9 @@ async function saveGroupData(groupId) {
   btn.className = "bg-slate-500 text-white text-xs font-bold py-2 px-2 rounded-lg flex items-center justify-center shadow transition cursor-wait";
   lucide.createIcons();
 
+  // 明確重新標記「目前這一天」為待送出：背景自動同步可能剛好已經把待送出清單清空過，
+  // 這裡重新標記，確保接下來這個有確認機制的正式「儲存」動作，一定會把今天的資料送出去。
+  markCurrentDateDirtyForCommit_();
   const savedOk = await ensureSavedBeforeProceed();
   if (savedOk) {
     await sendToGoogleSheet(groupId);
@@ -2320,6 +2583,7 @@ async function saveGroupData(groupId) {
 async function generateLineMessage(targetGroupId) {
   // 需求3：跟儲存按鈕一樣，產出LINE文字前也先確認雲端存檔成功（含多裝置衝突偵測），
   // 確認沒問題才繼續往下產出通知內容，避免用舊資料或即將被覆蓋的資料產出通知。
+  markCurrentDateDirtyForCommit_();
   const savedOk = await ensureSavedBeforeProceed();
   if (!savedOk) return;
 
@@ -2786,6 +3050,7 @@ function handleLeaveImportFile(event) {
       }
 
       MONTHLY_LEAVES_DB[yearMonth] = monthData;
+      dirtyLeaveMonths.add(yearMonth);
       saveDataToLocalStorage();
 
       let msg = `✅ 匯入完成！共匯入 ${importedCount} 位同仁 ${yearMonth} 的排班資料，已儲存到本機並同步雲端後台。`;
